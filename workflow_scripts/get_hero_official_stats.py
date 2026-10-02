@@ -1,163 +1,114 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException, TimeoutException, NoSuchElementException
-import os
+"""Build data/hero_official_stats.csv from our own match data.
+
+This file used to be scraped with Selenium from the official hero record pages,
+which no longer exist in that form. It is now computed from
+data/epic7_match_history.csv.gz (both sides of every match, banned heroes
+excluded since they did not fight), in the same format the app reads:
+
+  Hero, Rank ("Ranking: r / n" by win rate), Win Rate (percent),
+  Equipment / Equipment Win Rate (top gear sets, see below), Counters, Synergies
+
+Counters of a hero are the enemy heroes with the best win rate against it,
+Synergies the teammates with the best win rate alongside it, both requiring
+MIN_PAIR_GAMES games together. Gear sets are not in the match data yet, so the
+Equipment columns are carried over from the previous file where they exist.
+"""
 import csv
-import re
-import time
+import os
 
-# Function to save data to CSV
-def save_to_csv(data):
-    csv_file = 'data/hero_official_stats.csv'
-    with open(csv_file, mode='w', newline="", encoding='utf-8') as file:
-        writer = csv.DictWriter(file, fieldnames=['Hero', 'Rank', 'Win Rate', 'Equipment', 'Equipment Win Rate', 'Counters', 'Synergies'])
-        writer.writeheader()
-        for row in data:
-            writer.writerow(row)
-    print(f'Data has been successfully written to {csv_file}')
+import numpy as np
+import pandas as pd
 
-# Custom wait function to handle element loading
-def custom_find_element(driver, by, value, retries=3, delay=5):
-    for _ in range(retries):
-        try:
-            element = WebDriverWait(driver, delay).until(EC.presence_of_element_located((by, value)))
-            return element
-        except TimeoutException:
-            time.sleep(delay)
-    raise TimeoutException(f'Element with {by}={value} not found after {retries} retries')
+MATCHES = 'data/epic7_match_history.csv.gz'
+OUTPUT = 'data/hero_official_stats.csv'
+MIN_HERO_GAMES = 200   # to be ranked
+MIN_PAIR_GAMES = 300   # for a counter or synergy (win rates over fewer games are too noisy)
+TOP = 3
+NO_EQUIPMENT = ("{'0': [], '1': [], '2': [], '3': [], '4': []}", "{'0': -1, '1': -1, '2': -1, '3': -1, '4': -1}")
 
-# Custom wait function to handle multiple elements loading
-def custom_find_elements(driver, by, value, retries=3, delay=5):
-    for _ in range(retries):
-        try:
-            elements = WebDriverWait(driver, delay).until(EC.presence_of_all_elements_located((by, value)))
-            return elements
-        except TimeoutException:
-            time.sleep(delay)
-    raise TimeoutException(f'Elements with {by}={value} not found after {retries} retries')
+data = pd.read_csv(MATCHES).sort_values(['Match Number', 'Team', 'Pick Order'])
+if 'Banned' not in data.columns:
+    data['Banned'] = 0
+data = data[data.groupby('Match Number')['Hero'].transform('size') == 10]
+matches = len(data) // 10
 
-# Function to process a character
-def process_character(driver, character, root_url, max_retries=5):
-    url = root_url + character
-    attempt = 0
-    while attempt < max_retries:
-        try:
-            driver.get(url)
+codes = sorted(data['Hero'].unique())
+index = {code: i for i, code in enumerate(codes)}
+heroes = len(codes)
 
-            # Wait for the hero page to load
-            custom_find_element(driver, By.CLASS_NAME, 'hero-analysis-wrap')
+# (matches, 2 teams, 5 heroes), teams sorted 'Enemy Team' then 'My Team'
+hero_ids = data['Hero'].map(index).to_numpy().reshape(matches, 2, 5)
+fought = (data['Banned'] == 0).to_numpy().reshape(matches, 2, 5)
+team_won = (data['Match Result'] == 'Win').to_numpy().reshape(matches, 2, 5)[:, :, 0]
 
-            result = {
-                "Hero": character,
-                "Rank": "",
-                "Win Rate": "",
-                "Equipment": {
-                    "0": [],
-                    "1": [],
-                    "2": [],
-                    "3": [],
-                    "4": [],
-                },
-                "Equipment Win Rate": {
-                    "0": -1,
-                    "1": -1,
-                    "2": -1,
-                    "3": -1,
-                    "4": -1,
-                },
-                "Counters": [],
-                "Synergies": []
-            }
-            # Wait until rank is loaded
-            custom_find_element(driver, By.CSS_SELECTOR, 'div.win-rate-wrap')
+# Per hero: games and wins (fighting heroes only, both sides)
+games = np.bincount(hero_ids[fought], minlength=heroes)
+wins = np.bincount(hero_ids[fought], weights=np.repeat(team_won[:, :, None], 5, axis=2)[fought], minlength=heroes)
 
-            try:
-                # Get winrate rank
-                rank = custom_find_element(driver, By.CSS_SELECTOR, '.up.rank, .down.rank, .same.rank')
-                result['Rank'] = rank.text
-                win_rate = custom_find_element(driver, By.CLASS_NAME, 'win-rate').text
-                result['Win Rate'] = re.search(r'(\d+(?:\.\d+)?)', win_rate).group()
-            except Exception:
-                result['Win Rate'] = ""
+# Pairs: same team (synergy) and opposite teams (counter), fighting heroes only
+synergy_games = np.zeros((heroes, heroes))
+synergy_wins = np.zeros((heroes, heroes))
+versus_games = np.zeros((heroes, heroes))
+versus_wins = np.zeros((heroes, heroes))  # [a, b]: games a won against b
+for side in (0, 1):
+    a, a_fought, won = hero_ids[:, side], fought[:, side], team_won[:, side]
+    b, b_fought = hero_ids[:, 1 - side], fought[:, 1 - side]
+    for i in range(5):
+        for j in range(5):
+            if i != j:
+                sel = a_fought[:, i] & a_fought[:, j]
+                np.add.at(synergy_games, (a[sel, i], a[sel, j]), 1)
+                np.add.at(synergy_wins, (a[sel, i], a[sel, j]), won[sel])
+            sel = a_fought[:, i] & b_fought[:, j]
+            np.add.at(versus_games, (a[sel, i], b[sel, j]), 1)
+            np.add.at(versus_wins, (a[sel, i], b[sel, j]), won[sel])
 
-            try:
-                # Get equipment box
-                equipments = custom_find_elements(driver, By.CSS_SELECTOR, 'ul.equip-list-wrap > li')
-                for i, equipment in enumerate(equipments):
-                    equipment_rank = custom_find_element(equipment, By.CLASS_NAME, 'equip-name').text
 
-                    try:
-                        equipment_win_rate = custom_find_element(equipment, By.CLASS_NAME, 'equip-winrate').text
-                        equipment_win_rate = re.search(r'(\d+(?:\.\d+)?)', equipment_win_rate).group()
-                    except Exception:
-                        equipment_win_rate = ""
+def best(win_matrix, game_matrix, hero, expected):
+    """Codes of the TOP partners whose win rate in this pairing beats what they usually get.
 
-                    result['Equipment Win Rate'][str(i)] = equipment_win_rate
+    Scoring against the expected rate stops generally strong heroes from topping every list.
+    """
+    row_games = game_matrix[hero]
+    rate = np.divide(win_matrix[hero], row_games, out=np.zeros(heroes), where=row_games > 0)
+    lift = np.where(row_games >= MIN_PAIR_GAMES, rate - expected, -np.inf)
+    order = [j for j in np.argsort(-lift) if np.isfinite(lift[j]) and lift[j] > 0][:TOP]
+    return [codes[j] for j in order]
 
-                    equipment_names = custom_find_elements(equipment, By.CSS_SELECTOR, 'ul.equip-icon img')
-                    for equipment_name in equipment_names:
-                        result['Equipment'][str(i)].append(equipment_name.get_attribute('alt'))
-            except Exception as e:
-                print(f'Error processing equipment for {character}: {e}')
 
-            try:
-                # Get counters and synergies
-                counters = custom_find_element(driver, By.CLASS_NAME, 'hard-hero')
-                counter_heroes = custom_find_elements(counters, By.CSS_SELECTOR, 'ul > li')
-                for counter_hero in counter_heroes:
-                    result['Counters'].append(custom_find_element(counter_hero, By.CSS_SELECTOR, 'img').get_attribute('alt'))
-            except Exception as e:
-                print(f'Error processing counters for {character}: {e}')
+# Previous equipment data, kept until gear sets are collected with the matches
+previous = {}
+if os.path.exists(OUTPUT):
+    with open(OUTPUT, newline='', encoding='utf-8') as file:
+        previous = {row['Hero']: (row['Equipment'], row['Equipment Win Rate']) for row in csv.DictReader(file)}
 
-            try:
-                synergies = custom_find_element(driver, By.CLASS_NAME, 'with-hero')
-                synergy_heroes = custom_find_elements(synergies, By.CSS_SELECTOR, 'ul > li')
-                for synergy_hero in synergy_heroes:
-                    result['Synergies'].append(custom_find_element(synergy_hero, By.CSS_SELECTOR, 'img').get_attribute('alt'))
-            except Exception as e:
-                print(f'Error processing synergies for {character}: {e}')
+win_rate = np.divide(wins, games, out=np.zeros(heroes), where=games > 0)
+ranked = [h for h in np.argsort(-win_rate) if games[h] >= MIN_HERO_GAMES]
+rank_of = {h: r + 1 for r, h in enumerate(ranked)}
 
-            return result  # Return the result if no exception was raised
-        except Exception as e:
-            attempt += 1
-            print(f'Attempt {attempt} failed for {character}: {e}')
-            if attempt < max_retries:
-                time.sleep(2)  # Wait before retrying
-            else:
-                print(f'Failed to process {character} after {max_retries} attempts')
-                return result
+rows = []
+for h, code in enumerate(codes):
+    equipment, equipment_rate = previous.get(code, NO_EQUIPMENT)
+    rows.append({
+        'Hero': code,
+        'Rank': f'Ranking: {rank_of[h]} / {len(ranked)}' if h in rank_of else '',
+        'Win Rate': f'{win_rate[h] * 100:.2f}' if games[h] else '',
+        'Equipment': equipment,
+        'Equipment Win Rate': equipment_rate,
+        # Counters: enemies that beat this hero more often than they beat anyone (versus_wins[enemy, hero])
+        'Counters': str(best(versus_wins.T, versus_games.T, h, win_rate)),
+        # Synergies: teammates who win together more than the pair's own average
+        'Synergies': str(best(synergy_wins, synergy_games, h, (win_rate + win_rate[h]) / 2)),
+    })
 
-try:
-    # Initialize the Chrome driver outside the process_character function
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")  # Enable headless mode
-    chrome_options.add_argument("--disable-gpu")
-    #chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.page_load_strategy = 'none'
+# Heroes not seen in this season's matches keep their previous row
+if os.path.exists(OUTPUT):
+    with open(OUTPUT, newline='', encoding='utf-8') as file:
+        rows += [row for row in csv.DictReader(file) if row['Hero'] not in index]
 
-    driver = webdriver.Chrome(options=chrome_options)
-
-    # Get Folders in the dataset (Characters)
-    character_names = [f for f in os.listdir('dataset') if os.path.isdir(os.path.join('dataset', f))]
-    root_url = 'https://epic7.onstove.com/en/gg/herorecord/'
-
-    data = []
-
-    for character in character_names:
-        print(f'Processing {character}...')
-        character_data = process_character(driver, character, root_url)
-        if character_data:
-            data.append(character_data)
-        print(f'Finished processing {character}')
-
-except Exception as e:
-    print(f'General error: {e}')
-
-finally:
-    save_to_csv(data)
-    # Quit the driver after processing all characters
-    driver.quit()
+with open(OUTPUT, 'w', newline='', encoding='utf-8') as file:
+    writer = csv.DictWriter(file, fieldnames=['Hero', 'Rank', 'Win Rate', 'Equipment', 'Equipment Win Rate',
+                                              'Counters', 'Synergies'], lineterminator='\n')
+    writer.writeheader()
+    writer.writerows(rows)
+print(f'Wrote {len(rows)} heroes to {OUTPUT} ({len(ranked)} ranked, from {matches} matches)')

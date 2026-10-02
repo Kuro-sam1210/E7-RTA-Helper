@@ -71,24 +71,21 @@ func on_show_recommendation(recommendation: Array):
 	for portrait in portraits:
 		portrait.texture = load('res://UI/MatchSelect/unknown_hero.png')
 	for label in labels:
-		label.text = "WR NaN%"
+		label.text = ""
 	print('rec len: ' + str(len(recommendation)))
-	# Now show recommendations
+	# Now show recommendations. Every recommended hero is drawn, even without a stats row
+	# (new heroes would otherwise be skipped and leave gaps in the grid)
 	var i = 0
 	for rec in recommendation:
 		# If rec is more than what we can handle, break
 		if i >= len(portraits):
-					break
+			break
+		set_hero_portrait(portraits[i], str(rec))
+		labels[i].text = "WR —"
 		for chars in hero_data:
-			if chars['Hero'] == rec:
-				var image = Image.load_from_file('dataset/'+str(rec)+'/c.png')
-				var texture = ImageTexture.create_from_image(image)
-				texture.resource_name = 'dataset/'+str(rec)+'/c.png'
-				portraits[i].texture = texture
-				#portraits[i].texture = load('dataset/'+str(rec)+'/c.png')
-				if chars['Win Rate']:
-					labels[i].text = "WR " + str(chars['Win Rate'])+"%"
-				i += 1
+			if chars['Hero'] == rec and str(chars['Win Rate']).is_valid_float():
+				labels[i].text = "WR " + str(chars['Win Rate'])+"%"
+		i += 1
 	
 func on_show_counters(character: String):
 	#First set all portraits as unknown hero

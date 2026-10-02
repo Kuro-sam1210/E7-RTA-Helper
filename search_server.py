@@ -281,16 +281,6 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
         enemy_team_picks, user_team_picks = process_picks(enemy_team_picks, user_team_picks)
     
     
-    # First pick win/loss sequence
-    first_pick_win_sequences = []
-
-    if first_pick_team == 'My Team':
-        first_pick_win_sequences = [1,1,1,1,1,1,1,1,1,1]
-
-    else:
-        first_pick_win_sequences = [0,0,0,0,0,0,0,0,0,0]
-
-
     # Vectorized and Precomputed Lookup
     if first_pick_team == 'My Team':
         for i in range(len(user_team_picks) + len(enemy_team_picks)):
@@ -320,17 +310,23 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
     picks_sequence_encoded = hero_encoder.transform(combined_sequence)
     padded_sequence = pad_sequences([picks_sequence_encoded], maxlen=max_sequence_length, padding='pre')
 
-    # Drafting order and sequences
-    first_pick_team_encoded = 0 if first_pick_team == 'My Team' else 1
-    full_pick_order_sequence = np.arange(1, len(combined_sequence) + 1)
-    full_team_sequence = np.array([0, 1, 1, 0, 0, 1, 1, 0, 0, 1] if first_pick_team_encoded == 0 else [1, 0, 0, 1, 1, 0, 0, 1, 1, 0])
-    first_pick_sequence = np.array([1, 0, 0, 1, 1, 0, 0, 1, 1, 0])
+    # Per-pick sequences built exactly like get_rec_model.py's training examples, from the
+    # picks made so far (right-aligned, zero-padded):
+    #   team:            1 = our pick, 0 = enemy pick (LabelEncoder order: 'Enemy Team', 'My Team')
+    #   first pick:      1 if the pick belongs to the first-pick team
+    #   first pick win:  1 on the first-pick team's picks when that team is us, i.e. the
+    #                    suggestions are conditioned on our team winning
+    user_is_first = first_pick_team == 'My Team'
+    pick_count = len(combined_sequence)
+    is_first_team = np.array([i in first_pick_index for i in range(pick_count)])
+    full_pick_order_sequence = np.arange(1, pick_count + 1)
+    full_team_sequence = (is_first_team == user_is_first).astype(int)
+    first_pick_sequence = is_first_team.astype(int)
+    first_pick_win_sequences = (is_first_team & user_is_first).astype(int)
 
     # Ensure that the sequences do not contain any out-of-range indices before padding
     padded_sequence = np.clip(padded_sequence, 0, len(hero_encoder.classes_) - 1)
     full_pick_order_sequence = np.clip(full_pick_order_sequence, 0, max_sequence_length - 1)
-    full_team_sequence = np.clip(full_team_sequence, 0, max_sequence_length - 1)
-    first_pick_sequence = np.clip(first_pick_sequence, 0, max_sequence_length - 1)
     combined_types = [np.clip(seq, 0, 1) for seq in combined_types]  # Assuming combined_types are multi-hot vectors
 
     padded_order_sequence = pad_sequences([full_pick_order_sequence], maxlen=max_sequence_length, padding='pre')
@@ -402,9 +398,10 @@ def recommend_characters():
         recommendations = []
         try:
             enemy_picks = request.args.get('enemy_picks')
-            enemy_picks = enemy_picks.split(',')
+            # An empty parameter means no picks yet, not one unknown pick
+            enemy_picks = [h for h in enemy_picks.split(',') if h]
             user_picks = request.args.get('user_picks')
-            user_picks = user_picks.split(',')
+            user_picks = [h for h in user_picks.split(',') if h]
             first_pick_team = request.args.get('first_pick_team')
         except Exception:
             return jsonify({"message": "Please provide enemy_picks and user_picks and first_pick_team"}), 400

@@ -7,32 +7,37 @@ df = pd.read_csv('data/epic7_match_history.csv.gz')
 # Function to calculate winrates, counters, picks, and counters against
 def calculate_winrates_counters_and_counters_against(df):
     # Initialize dictionaries to store hero statistics
-    hero_stats = defaultdict(lambda: {'total_matches': 0, 'total_wins': 0, 'counters': defaultdict(int), 'picked_with': defaultdict(int), 'countered_by': defaultdict(int)})
+    hero_stats = defaultdict(lambda: {'total_matches': 0, 'fought': 0, 'fought_wins': 0, 'counters': defaultdict(int), 'picked_with': defaultdict(int), 'countered_by': defaultdict(int)})
+    if 'Banned' not in df.columns:
+        df = df.assign(Banned=0)
 
     # Group by 'Match Number' to efficiently handle enemy and team heroes
     match_groups = df.groupby('Match Number')
-    
-    # Iterate through each match
+
+    # Iterate through each match, from both teams' side (counting only the crawled player's
+    # side would inflate win rates, since those players are higher ranked than their opponents)
     for match_number, match_data in match_groups:
-        my_team_heroes = match_data[match_data['Team'] == 'My Team']['Hero'].values
-        enemy_team_heroes = match_data[match_data['Team'] == 'Enemy Team']['Hero'].values
-        
-        # Precompute win condition
-        win_mask = (match_data['Match Result'] == 'Win') & (match_data['Team'] == 'My Team')
-        
-        for hero in my_team_heroes:
-            hero_stats[hero]['total_matches'] += 1
-            if win_mask.any():
-                hero_stats[hero]['total_wins'] += 1
+        for team, other in (('My Team', 'Enemy Team'), ('Enemy Team', 'My Team')):
+            team_rows = match_data[match_data['Team'] == team]
+            team_heroes = team_rows['Hero'].values
+            enemy_team_heroes = match_data[match_data['Team'] == other]['Hero'].values
+            team_won = (team_rows['Match Result'] == 'Win').any()
 
-            # Update picked_with for allies and counters for enemies
-            for ally in my_team_heroes:
-                if ally != hero:
-                    hero_stats[hero]['picked_with'][ally] += 1
+            for hero, banned in zip(team_heroes, team_rows['Banned'].values):
+                hero_stats[hero]['total_matches'] += 1
+                # Win rate only from games the hero actually fought (not banned out)
+                if not banned:
+                    hero_stats[hero]['fought'] += 1
+                    hero_stats[hero]['fought_wins'] += int(team_won)
 
-            for enemy in enemy_team_heroes:
-                hero_stats[hero]['counters'][enemy] += 1
-                hero_stats[enemy]['countered_by'][hero] += 1
+                # Update picked_with for allies and counters for enemies
+                for ally in team_heroes:
+                    if ally != hero:
+                        hero_stats[hero]['picked_with'][ally] += 1
+
+                for enemy in enemy_team_heroes:
+                    hero_stats[hero]['counters'][enemy] += 1
+                    hero_stats[enemy]['countered_by'][hero] += 1
     
     # Calculate winrates, counters, picked_with, countered_by, and pick rates per hero
     winrates = {}
@@ -44,8 +49,8 @@ def calculate_winrates_counters_and_counters_against(df):
     total_matches = df['Match Number'].nunique()
 
     for hero, stats in hero_stats.items():
-        if stats['total_matches'] > 0:
-            winrates[hero] = stats['total_wins'] / stats['total_matches']
+        if stats['fought'] > 0:
+            winrates[hero] = stats['fought_wins'] / stats['fought']
         else:
             winrates[hero] = -1
         

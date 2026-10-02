@@ -44,6 +44,15 @@ var user_banned = ""
 var enemy_banned = ""
 var draft_had_picks = false
 
+# Frame noise: a draft only ends after several empty frames in a row, and teams are held
+# through frames that lose heroes (transition animations, the splash art on the enemy's turn)
+const EMPTY_FRAMES_TO_END_DRAFT = 3
+var empty_frames = 0
+var held_user_team = []
+var held_user_y = []
+var held_enemy_team = []
+var held_enemy_y = []
+
 # Check if paused
 var paused = false
 
@@ -213,6 +222,17 @@ func hero_at_height(team: Array, heights: Array, y) -> String:
 			best = str(team[i])
 	return best
 
+# [team, heights] to use for this frame: the held team when the frame only shows a subset of it
+func hold_team(team: Array, heights: Array, held: Array, held_heights: Array) -> Array:
+	if team.size() < held.size():
+		var subset = true
+		for hero in team:
+			if not held.has(hero):
+				subset = false
+		if subset:
+			return [held, held_heights]
+	return [team, heights]
+
 # Fill in what the current frame cannot show: prebans seen earlier in the draft, and a
 # banned hero whose slot the BANNED stamp now hides. Returns true when the bans changed.
 func apply_draft_memory(output: Dictionary) -> bool:
@@ -220,16 +240,23 @@ func apply_draft_memory(output: Dictionary) -> bool:
 	var enemy_team = output['enemy_team']
 	var seen_prebans = output.get('user_prebans', []) + output.get('enemy_prebans', [])
 	var no_picks = user_team.is_empty() and enemy_team.is_empty()
+	empty_frames = empty_frames + 1 if no_picks else 0
 
 	# Left the draft screen: forget this draft. Once all prebans are known the server stops
 	# looking for them, so then only picks disappearing (after there were some) ends the draft.
+	# Either way it takes several empty frames in a row, so one bad frame cannot end it.
 	var draft_over = no_picks and seen_prebans.is_empty()
 	if prebans.size() >= 4:
 		draft_over = no_picks and draft_had_picks
+	draft_over = draft_over and empty_frames >= EMPTY_FRAMES_TO_END_DRAFT
 	if not no_picks:
 		draft_had_picks = true
 	if draft_over:
 		draft_had_picks = false
+		held_user_team = []
+		held_user_y = []
+		held_enemy_team = []
+		held_enemy_y = []
 		prebans = []
 		full_user_team = []
 		full_user_y = []
@@ -241,6 +268,21 @@ func apply_draft_memory(output: Dictionary) -> bool:
 
 	if seen_prebans.size() > prebans.size():
 		prebans = seen_prebans
+
+	# A team never loses heroes during a draft (a banned one is handled below), so a frame
+	# showing only some of the heroes we already have keeps the fuller team
+	var held = hold_team(user_team, output['user_team_y'], held_user_team, held_user_y)
+	held_user_team = held[0]
+	held_user_y = held[1]
+	output['user_team'] = held_user_team
+	output['user_team_y'] = held_user_y
+	held = hold_team(enemy_team, output['enemy_team_y'], held_enemy_team, held_enemy_y)
+	held_enemy_team = held[0]
+	held_enemy_y = held[1]
+	output['enemy_team'] = held_enemy_team
+	output['enemy_team_y'] = held_enemy_y
+	user_team = held_user_team
+	enemy_team = held_enemy_team
 
 	if user_team.size() >= 5:
 		full_user_team = user_team.slice(0, 5)
