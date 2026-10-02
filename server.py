@@ -21,6 +21,15 @@ characters_in_match = []
 positions = {}
 y_coords = {}
 
+# Draft screen layout, as fractions of the (border-cropped) capture height
+TOP_BAR = 0.15         # player names and profile avatars, which are hero faces too
+PREBAN_ZONE = 0.86     # the four preban icons sit below this, at the bottom centre
+PREBAN_PAIR_GAP = 0.09 # icons of one side are ~0.077 apart, the two pairs ~0.105
+
+# "BANNED" stamp drawn over a banned hero's slot after the draft
+MIN_STAMP_MATCHES = 12
+stamp_descriptors = None
+
 @app.route('/set_num_threads', methods=['GET'])
 def set_num_threads():
     try:
@@ -71,9 +80,83 @@ def init_cache():
                              keypoints_flipped, descriptors_flipped)
                         )
 
+        load_ban_stamp()
         logging.info('Cache initialized successfully')
     except Exception as e:
         logging.error(f'Error initializing cache: {str(e)}')
+
+def load_ban_stamp():
+    global stamp_descriptors
+    stamp = cv2.imread('detection/banned_stamp.png', cv2.IMREAD_GRAYSCALE)
+    mask = cv2.imread('detection/banned_stamp_mask.png', cv2.IMREAD_GRAYSCALE)
+    if stamp is None or mask is None:
+        logging.error('Ban stamp template missing, bans will not be detected')
+        stamp_descriptors = None
+        return
+    # Only keypoints on the red stamp itself, not the hero art behind it
+    mask = cv2.dilate(mask, np.ones((5, 5), np.uint8))
+    _, stamp_descriptors = cv2.SIFT_create().detectAndCompute(stamp, mask)
+
+def good_matches(template_descriptors, target_descriptors, ratio):
+    if template_descriptors is None or target_descriptors is None or len(target_descriptors) < 2:
+        return []
+    pairs = cv2.BFMatcher().knnMatch(template_descriptors, target_descriptors, k=2)
+    return [p[0] for p in pairs if len(p) == 2 and p[0].distance < ratio * p[1].distance]
+
+def find_ban_stamp(keypoints, descriptors, height):
+    """Normalised y of the BANNED stamp among these keypoints (one half of the screen), or None."""
+    good = good_matches(stamp_descriptors, descriptors, 0.75)
+    if len(good) < MIN_STAMP_MATCHES:
+        return None
+    ys = np.array([keypoints[m.trainIdx].pt[1] for m in good])
+    median = np.median(ys)
+    if np.sum(np.abs(ys - median) < 0.08 * height) < MIN_STAMP_MATCHES:
+        return None
+    return float(median / height)
+
+def find_prebans(band, height):
+    """Prebans in the bottom band: two icons per side, ours on the left.
+
+    The same hero can be prebanned by both sides, so each hero's matched keypoints
+    are grouped into separate icons by x before splitting the icons into sides.
+    """
+    keypoints, descriptors = cv2.SIFT_create().detectAndCompute(band, None)
+    if descriptors is None:
+        return [], []
+
+    icons = []  # (x, hero)
+    for character, cached in descriptor_cache.items():
+        for keypoints_normal, descriptors_normal, keypoints_flipped, descriptors_flipped in cached:
+            good = good_matches(descriptors_normal, descriptors, 0.5)
+            if len(good) < 4:
+                good = good_matches(descriptors_flipped, descriptors, 0.5)
+            if len(good) < 4:
+                continue
+            xs = sorted(keypoints[m.trainIdx].pt[0] for m in good)
+            group = [xs[0]]
+            for x in xs[1:] + [None]:
+                if x is not None and x - group[-1] < PREBAN_PAIR_GAP * height / 2:
+                    group.append(x)
+                    continue
+                if len(group) >= 3:
+                    icons.append((float(np.mean(group)), character))
+                group = [x]
+            break
+
+    icons.sort()
+    if len(icons) >= 4:
+        split = 2
+    elif len(icons) == 3:
+        gaps = [icons[1][0] - icons[0][0], icons[2][0] - icons[1][0]]
+        split = 1 if gaps[0] > gaps[1] else 2
+    elif len(icons) == 2:
+        if icons[1][0] - icons[0][0] > PREBAN_PAIR_GAP * height:
+            split = 1
+        else:
+            split = 2 if icons[1][0] < band.shape[1] / 2 else 0
+    else:
+        split = len([x for x, _ in icons if x < band.shape[1] / 2])
+    return [hero for _, hero in icons[:split]][:2], [hero for _, hero in icons[split:]][:2]
 
 def SIFT_feature_matching(target_gray, descriptors_target, keypoints_target, character, template_index):  
 		keypoints_template_normal, descriptors_template_normal, keypoints_template_flipped, descriptors_template_flipped = descriptor_cache[character][template_index]
@@ -147,10 +230,17 @@ def _test_SIFT_feature_matching():
     crop_top = int(height * (crop_top_percent / 100))
 
     target_image = target_image[crop_top:-crop_bottom, crop_left:-crop_right]
+    return jsonify(detect_draft(target_image, crop_middle))
+
+def detect_draft(target_image, crop_middle=0):
+    """Heroes in each team's slots (top to bottom), banned slots and prebans on a draft screen."""
+    height, width = target_image.shape[:2]
+
+    # Prebans sit at the bottom centre, which the middle crop below removes
+    preban_band = cv2.cvtColor(target_image[int(height * PREBAN_ZONE):], cv2.COLOR_BGR2GRAY)
+    user_prebans, enemy_prebans = find_prebans(preban_band, height)
 
     # Crop middle
-
-    height, width = target_image.shape[:2]
     middle = width // 2
     offset = int(width * (float(crop_middle)/100)) // 2  # 20% of the image width
 
@@ -166,7 +256,7 @@ def _test_SIFT_feature_matching():
     keypoints_target, descriptors_target = sift.detectAndCompute(target_gray, None)
 
     # Clear previous results
-    characters_in_match.clear()  
+    characters_in_match.clear()
     positions.clear()
     y_coords.clear()
 
@@ -174,11 +264,32 @@ def _test_SIFT_feature_matching():
         for template_index, (normal_gray, flipped_gray) in enumerate(templates):
             SIFT_feature_matching(target_gray, descriptors_target, keypoints_target, character, template_index)
 
-    user_team = [code for code, position in positions.items() if position == 'left']
+    # Only the hero slots count as picks: skip the avatars in the top bar and the prebans
+    in_slots = {code for code in positions if TOP_BAR <= y_coords[code] / height < PREBAN_ZONE}
+    user_team = [code for code, position in positions.items() if position == 'left' and code in in_slots]
     user_team.sort(key=lambda x: y_coords[x])
-    enemy_team = [code for code, position in positions.items() if position == 'right']
+    enemy_team = [code for code, position in positions.items() if position == 'right' and code in in_slots]
     enemy_team.sort(key=lambda x: y_coords[x])
-    return jsonify({"user_team": user_team, "enemy_team": enemy_team})
+
+    # BANNED stamps, searched separately in each half so one cannot hide the other
+    half = target_gray.shape[1] / 2
+    banned_y = {}
+    for side, on_side in (('user', lambda x: x < half), ('enemy', lambda x: x >= half)):
+        idx = [i for i, kp in enumerate(keypoints_target) if on_side(kp.pt[0])]
+        side_descriptors = descriptors_target[idx] if descriptors_target is not None and idx else None
+        banned_y[side] = find_ban_stamp([keypoints_target[i] for i in idx], side_descriptors, height)
+
+    return {
+        "user_team": user_team,
+        "enemy_team": enemy_team,
+        # Slot heights (fraction of the screen), so a ban stamp can be matched to its slot
+        "user_team_y": [y_coords[code] / height for code in user_team],
+        "enemy_team_y": [y_coords[code] / height for code in enemy_team],
+        "user_banned_y": banned_y['user'],
+        "enemy_banned_y": banned_y['enemy'],
+        "user_prebans": user_prebans,
+        "enemy_prebans": enemy_prebans,
+    }
 
 
 @app.route('/capture_save', methods=['GET'])

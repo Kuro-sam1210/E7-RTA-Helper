@@ -34,6 +34,15 @@ var rule = ""
 var last_user_team = ""
 var last_enemy_team = ""
 
+# Draft memory: prebans, each team once all 5 were seen (with slot heights), and bans
+var prebans = []
+var full_user_team = []
+var full_user_y = []
+var full_enemy_team = []
+var full_enemy_y = []
+var user_banned = ""
+var enemy_banned = ""
+
 # Check if paused
 var paused = false
 
@@ -173,7 +182,7 @@ func request_ban_suggestions():
 	if ban_http_request.get_http_client_status() != 0:
 		ban_http_request.cancel_request()
 	var first_pick_team = "My Team" if is_user_first_pick else "Enemy Team"
-	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend_ban"+"?user_picks="+last_user_team+"&enemy_picks="+last_enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule
+	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend_ban"+"?user_picks="+last_user_team+"&enemy_picks="+last_enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&user_banned="+user_banned+"&enemy_banned="+enemy_banned
 	print('ban url: '+url)
 	ban_http_request.request(url)
 
@@ -189,6 +198,59 @@ func _on_ban_suggestions_completed(result, response_code, headers, body):
 	# Expected win rate once both sides make their best ban
 	$CanvasLayer/MatchSelect/Container/ColorRect/WinPredictionBar.value = float(Bans['win_prediction'])*100
 
+# The hero whose slot height is closest to the BANNED stamp
+func hero_at_height(team: Array, heights: Array, y) -> String:
+	var best = ""
+	var best_distance = 1.0
+	for i in range(min(team.size(), heights.size())):
+		var distance = abs(float(heights[i]) - float(y))
+		if distance < best_distance:
+			best_distance = distance
+			best = str(team[i])
+	return best
+
+# Fill in what the current frame cannot show: prebans seen earlier in the draft, and a
+# banned hero whose slot the BANNED stamp now hides. Returns true when the bans changed.
+func apply_draft_memory(output: Dictionary) -> bool:
+	var user_team = output['user_team']
+	var enemy_team = output['enemy_team']
+	var seen_prebans = output.get('user_prebans', []) + output.get('enemy_prebans', [])
+
+	# Left the draft screen: forget this draft
+	if user_team.is_empty() and enemy_team.is_empty() and seen_prebans.is_empty():
+		prebans = []
+		full_user_team = []
+		full_user_y = []
+		full_enemy_team = []
+		full_enemy_y = []
+		user_banned = ""
+		enemy_banned = ""
+		return false
+
+	if seen_prebans.size() > prebans.size():
+		prebans = seen_prebans
+
+	if user_team.size() >= 5:
+		full_user_team = user_team.slice(0, 5)
+		full_user_y = output['user_team_y'].slice(0, 5)
+	if enemy_team.size() >= 5:
+		full_enemy_team = enemy_team.slice(0, 5)
+		full_enemy_y = output['enemy_team_y'].slice(0, 5)
+
+	var new_user_banned = user_banned
+	var new_enemy_banned = enemy_banned
+	if output.get('user_banned_y') != null and full_user_team.size() == 5:
+		new_user_banned = hero_at_height(full_user_team, full_user_y, output['user_banned_y'])
+		output['user_team'] = full_user_team
+	if output.get('enemy_banned_y') != null and full_enemy_team.size() == 5:
+		new_enemy_banned = hero_at_height(full_enemy_team, full_enemy_y, output['enemy_banned_y'])
+		output['enemy_team'] = full_enemy_team
+
+	var changed = new_user_banned != user_banned or new_enemy_banned != enemy_banned
+	user_banned = new_user_banned
+	enemy_banned = new_enemy_banned
+	return changed
+
 var index = 0
 func _on_detection_completed(result, response_code, headers, body):
 	print("Char Detection Completed!")
@@ -197,7 +259,8 @@ func _on_detection_completed(result, response_code, headers, body):
 		var json = JSON.new()
 		json.parse(body.get_string_from_utf8())
 		DetectOutput = json.get_data()
-		
+		var bans_changed = apply_draft_memory(DetectOutput)
+
 		var user_team = ""
 		index+=1
 		if len(DetectOutput['user_team'])>0:
@@ -245,10 +308,16 @@ func _on_detection_completed(result, response_code, headers, body):
 				var first_pick_team = "My Team"if is_user_first_pick else "Enemy Team"
 				last_user_team = user_team
 				last_enemy_team = enemy_team
-				var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule
+				var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&prebans="+",".join(prebans)
 				print('url: '+url)
 				misc_http_request.request(url)
-				
+
+		elif bans_changed and full_user_team.size() == 5 and full_enemy_team.size() == 5:
+			# Bans just appeared on screen: refresh the ban view with the exact post-ban win rate
+			last_user_team = ",".join(full_user_team)
+			last_enemy_team = ",".join(full_enemy_team)
+			request_ban_suggestions()
+
 	else:
 		request_done = true # Try again
 		can_ask_rec = true

@@ -347,7 +347,7 @@ def process_picks(first_team_picks, non_first_team_picks):
 
     return first_team_picks, non_first_team_picks
 
-def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team):
+def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, prebans=()):
     combined_sequence = []
     combined_types = []
     first_pick_index = [0, 3, 4, 7, 8]
@@ -368,15 +368,15 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team):
     # When both are empty, then return a high pickrate hero
     if first_pick_team == 'My Team' and len(user_team_picks) == 0:
         np.random.shuffle(most_picked)
-        most_picks = most_picked[:10].tolist()
+        most_picks = [h for h in most_picked if h not in prebans][:10]
         return jsonify({
         'top_10_heroes': most_picks,
         'win_prediction': str(50.0)
         }), 200
-    
+
     elif first_pick_team == 'Enemy Team' and len(enemy_team_picks) == 0:
         np.random.shuffle(most_picked)
-        most_picks = most_picked[:10].tolist()
+        most_picks = [h for h in most_picked if h not in prebans][:10]
         return jsonify({
         'top_10_heroes': most_picks,
         'win_prediction': str(50.0)
@@ -477,7 +477,9 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team):
     
     prediction, win_prediction = model.predict([padded_sequence, padded_order_sequence, padded_team_sequence, padded_first_pick_sequence, padded_types_sequence, X_first_pick_wins])
 
+    # Picked and prebanned heroes (prebans remove a hero for both players) cannot be suggested
     combined_hero_indices = set(picks_sequence_encoded)
+    combined_hero_indices.update(hero_encoder.transform([h for h in prebans if h in available_heroes]))
     top_10_indices = np.argsort(prediction[0])[::-1]
     filtered_top_10_indices = [idx for idx in top_10_indices if idx not in combined_hero_indices][:10]
 
@@ -514,7 +516,8 @@ def recommend_characters():
         except Exception:
             available_characters = set(data['Hero'].unique()) - set(user_picks) - set(enemy_picks)
             
-        result = predict_next_hero(enemy_picks, user_picks, first_pick_team)
+        prebans = [h for h in request.args.get('prebans', '').split(',') if h]
+        result = predict_next_hero(enemy_picks, user_picks, first_pick_team, prebans)
         return result
     
     except Exception as e:
