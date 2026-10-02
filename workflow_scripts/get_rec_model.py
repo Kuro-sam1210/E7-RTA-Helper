@@ -1,207 +1,156 @@
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import LabelEncoder, MultiLabelBinarizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Embedding, Dense, Masking, Concatenate, Input, Lambda
-import tensorflow as tf
-from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras import activations, initializers, regularizers
-from tensorflow.keras.layers import LSTM, Dropout
-from tensorflow.keras import backend as K
-from tensorflow.keras.regularizers import l2
-from attention import Attention
+"""Train the pick recommender: data/rec_model.h5 + data/rec_variables.pkl.
+
+Each match's 10 picks (global draft order) become 9 examples: the picks so far
+predict the next pick (next_hero output) and whether the first-pick team wins
+(win_output). Inputs per pick: hero, pick order, team, first pick, hero role
+types and the first-pick-win flag, plus the match's warfare rule.
+
+Preprocessing works on whole arrays (every match has exactly 10 rows) so it
+scales to hundreds of thousands of matches, labels are sparse (integer) to keep
+memory low, and batches are streamed with tf.data.
+
+Usage:
+  python workflow_scripts/get_rec_model.py                       # full data
+  python workflow_scripts/get_rec_model.py --sample 5000 --epochs 1   # quick check
+"""
+import argparse
 import ast
 import pickle
-from tensorflow_model_optimization.python.core.keras.compat import keras
 
-import os
-os.environ['TF_XLA_FLAGS'] = '--tf_xla_cpu_global_jit'
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from attention import Attention
+from sklearn.preprocessing import LabelEncoder, MultiLabelBinarizer
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.layers import (LSTM, Concatenate, Dense, Dropout, Embedding, Flatten, Input, Masking,
+                                     RepeatVector)
+from tensorflow.keras.models import Model
+from tensorflow.keras.regularizers import l2
 
-tf.config.optimizer.set_jit(True)  # Enable XLA
+parser = argparse.ArgumentParser()
+parser.add_argument('--matches', default='data/epic7_match_history.csv.gz')
+parser.add_argument('--sample', type=int, help='train on this many random matches (for quick checks)')
+parser.add_argument('--batch-size', type=int, default=256)
+parser.add_argument('--lr', type=float, default=3e-4)
+parser.add_argument('--epochs', type=int, default=50)
+parser.add_argument('--patience', type=int, default=1)
+parser.add_argument('--output-dir', default='data')
+args = parser.parse_args()
+MODEL_PATH = f'{args.output_dir}/rec_model.h5'
+VARIABLES_PATH = f'{args.output_dir}/rec_variables.pkl'
+PICKS = 10
+max_sequence_length = PICKS - 1
 
-# Load data
-data = pd.read_csv('data/epic7_match_history.csv.gz')
+# Load data, one row per pick
+data = pd.read_csv(args.matches)
 hero_details = pd.read_csv('data/hero_types.csv')
+data = data.merge(hero_details[['code', 'type']], left_on='Hero', right_on='code', how='left')
+if 'Rule' not in data.columns:
+    data['Rule'] = ''
+data['Rule'] = data['Rule'].fillna('')
+data.loc[~data['Rule'].str.startswith('rta_openingrule'), 'Rule'] = ''
 
-data = data.merge(hero_details, left_on='Hero', right_on='code', how='left')
+# Keep complete matches (10 picks, orders 1-10) whose heroes all have role types
+data = data.sort_values(['Match Number', 'Pick Order'])
+per_match = data.groupby('Match Number').agg(picks=('Pick Order', 'size'), orders=('Pick Order', 'nunique'),
+                                             typed=('type', lambda t: t.notna().all()))
+valid = per_match.index[(per_match['picks'] == PICKS) & (per_match['orders'] == PICKS) & per_match['typed']]
+print(f'Invalid Matches: {len(per_match) - len(valid)} of {len(per_match)}')
+if args.sample:
+    valid = np.random.default_rng(7).choice(valid, size=min(args.sample, len(valid)), replace=False)
+data = data[data['Match Number'].isin(valid)].sort_values(['Match Number', 'Pick Order'])
+num_matches = len(data) // PICKS
+print(f'{num_matches} matches')
 
-# Add a 'First_Pick_Win' feature
-data['First_Pick_Win'] = (data['First Pick'] == 1) & (data['Match Result'] == 'Win')
-# Encode the 'First_Pick_Win' and 'First_Pick_Loss' as binary features
-data['First_Pick_Win_encoded'] = data['First_Pick_Win'].astype(int)
+# Encoders (same classes as the original script, plus the warfare rule)
+hero_encoder = LabelEncoder().fit(list(data['Hero'].unique()) + ['unknown'])
+team_encoder = LabelEncoder().fit(data['Team'])
+first_pick_encoder = LabelEncoder().fit(data['First Pick'])
+type_lists = data['type'].apply(ast.literal_eval)
+type_encoder = MultiLabelBinarizer().fit(list(type_lists) + [['Unknown']])
+rule_encoder = LabelEncoder().fit(['unknown'] + sorted(r for r in data['Rule'].unique() if r))
 
-# Encode heroes and teams as integers
-hero_encoder = LabelEncoder()
-hero_encoder.fit(list(data['Hero'].unique())+['unknown'])
-data['Hero_encoded'] = hero_encoder.transform(data['Hero'])
-
-team_encoder = LabelEncoder()
-data['Team_encoded'] = team_encoder.fit_transform(data['Team'])
-
-# Function to check for problematic entries
-def ensure_list(x):
-    if pd.isna(x):
-        return False  # Mark as problematic
-    return True
-
-# Apply the function to identify rows with issues
-data['is_valid'] = data['type'].apply(ensure_list)
-
-# Identify the Match Numbers with any invalid rows
-invalid_matches = data.loc[~data['is_valid'], 'Match Number'].unique()
-print(f'Invalid Matches: {invalid_matches}')
-
-# Identify the Match Numbers with any invalid rows
-invalid_matches = data.loc[~data['is_valid'], 'Match Number'].unique()
-
-# Drop all rows with those Match Numbers
-data = data[~data['Match Number'].isin(invalid_matches)].drop(columns=['is_valid'])
+# (matches, 10) arrays in draft order
+heroes = hero_encoder.transform(data['Hero']).reshape(num_matches, PICKS)
+orders = data['Pick Order'].to_numpy().reshape(num_matches, PICKS)
+teams = team_encoder.transform(data['Team']).reshape(num_matches, PICKS)
+first_picks = first_pick_encoder.transform(data['First Pick']).reshape(num_matches, PICKS)
+first_pick_wins = ((data['First Pick'] == 1) & (data['Match Result'] == 'Win')).astype(int).to_numpy() \
+    .reshape(num_matches, PICKS)
+types = type_encoder.transform(type_lists).astype(np.uint8).reshape(num_matches, PICKS, -1)
+match_rules = data['Rule'].to_numpy().reshape(num_matches, PICKS)[:, 0]
+rules = rule_encoder.transform(np.where(match_rules == '', 'unknown', match_rules))
+num_heroes, num_types, num_rules = len(hero_encoder.classes_), len(type_encoder.classes_), len(rule_encoder.classes_)
 
 
-def safe_literal_eval(val):
-    try:
-        return ast.literal_eval(val)
-    except (ValueError, SyntaxError):
-        print(f"Error with value: {val}")
-        return val  # Return the original value if it fails
+def build_examples(match_idx):
+    """For each match, prefixes of 1..9 picks (pre-padded to 9) and the pick that follows."""
+    count = len(match_idx) * max_sequence_length
+    x = {name: np.zeros((count, max_sequence_length), dtype=np.int32)
+         for name in ('heroes', 'orders', 'teams', 'first_picks', 'first_pick_wins')}
+    x['types'] = np.zeros((count, max_sequence_length, num_types), dtype=np.uint8)
+    x['rule'] = np.repeat(rules[match_idx], max_sequence_length)[:, None].astype(np.int32)
+    next_hero = np.zeros(count, dtype=np.int32)
+    win = np.repeat(first_pick_wins[match_idx, 0], max_sequence_length).astype(np.float32)
+    for length in range(1, PICKS):
+        rows = slice((length - 1) * len(match_idx), length * len(match_idx))
+        for name, source in (('heroes', heroes), ('orders', orders), ('teams', teams),
+                             ('first_picks', first_picks), ('first_pick_wins', first_pick_wins)):
+            x[name][rows, -length:] = source[match_idx, :length]
+        x['types'][rows, -length:] = types[match_idx, :length]
+        next_hero[rows] = heroes[match_idx, length]
+    # Same index clipping as the original script and search_server.py
+    x['orders'] = np.clip(x['orders'], 0, max_sequence_length - 1)
+    x['first_pick_wins'] = np.clip(x['first_pick_wins'], 0, max_sequence_length - 1)
+    return x, {'next_hero': next_hero, 'win_output': win}
 
-# Convert the 'type' column from string to list
-data['type'] = data['type'].apply(safe_literal_eval)
 
-# Encode types as multi-hot vectors
-type_encoder = MultiLabelBinarizer()
-unique_types = np.unique(data['type'])
+def dataset(x, y, shuffle):
+    ds = tf.data.Dataset.from_tensor_slices((x, y))
+    if shuffle:
+        ds = ds.shuffle(200_000, seed=7, reshuffle_each_iteration=True)
+    ds = ds.batch(args.batch_size).map(
+        lambda x, y: ({**x, 'types': tf.cast(x['types'], tf.float32)}, y), num_parallel_calls=tf.data.AUTOTUNE)
+    return ds.prefetch(tf.data.AUTOTUNE)
 
-type_encoder.fit(list(unique_types)+['Unknown'])
-data['Type_encoded'] = list(type_encoder.transform(data['type']))
 
-# Encode first pick
-first_pick_encoder = LabelEncoder()
-data['First_Pick_encoded'] = first_pick_encoder.fit_transform(data['First Pick'])
+# Split by match so a validation draft never shares prefixes with training
+order = np.random.default_rng(7).permutation(num_matches)
+val_matches = order[: num_matches // 5]
+train_matches = order[num_matches // 5:]
+train_ds = dataset(*build_examples(train_matches), shuffle=True)
+val_ds = dataset(*build_examples(val_matches), shuffle=False)
+print(f'{len(train_matches) * max_sequence_length} training / {len(val_matches) * max_sequence_length} '
+      f'validation examples, {num_heroes} heroes, {num_types} types, rules {list(rule_encoder.classes_)}')
 
-# Prepare sequences and labels
-sequences = []
-labels = []
-pick_orders = []
-team_sequences = []
-type_sequences = []
-first_pick_sequences = []
-first_pick_win_sequences = []
+# Model: as before, with the warfare rule repeated across the sequence
+embedding_dim = 512
+input_heroes = Input(shape=(max_sequence_length,), name='heroes')
+input_pick_orders = Input(shape=(max_sequence_length,), name='orders')
+input_teams = Input(shape=(max_sequence_length,), name='teams')
+input_first_picks = Input(shape=(max_sequence_length,), name='first_picks')
+input_types = Input(shape=(max_sequence_length, num_types), name='types')
+input_first_pick_wins = Input(shape=(max_sequence_length,), name='first_pick_wins')
+input_rule = Input(shape=(1,), name='rule')
 
-for match_number in data['Match Number'].unique():
-    match_df = data[data['Match Number'] == match_number]
-    
-    picks_sequence = match_df.sort_values(by='Pick Order')['Hero_encoded'].tolist()
-    pick_order_sequence = match_df.sort_values(by='Pick Order')['Pick Order'].tolist()
-    team_sequence = match_df.sort_values(by='Pick Order')['Team_encoded'].tolist()
-    type_sequence = match_df.sort_values(by='Pick Order')['Type_encoded'].tolist()
-    first_pick_sequence = match_df.sort_values(by='Pick Order')['First_Pick_encoded'].tolist()
-    first_pick_win_sequence = match_df.sort_values(by='Pick Order')['First_Pick_Win_encoded'].tolist()
+masking_heroes = Masking(mask_value=0.0)(Embedding(num_heroes, embedding_dim)(input_heroes))
+masking_orders = Masking(mask_value=0.0)(Embedding(max_sequence_length, embedding_dim)(input_pick_orders))
+masking_teams = Masking(mask_value=0.0)(Embedding(len(team_encoder.classes_), embedding_dim)(input_teams))
+masking_first_picks = Masking(mask_value=0.0)(
+    Embedding(len(first_pick_encoder.classes_), embedding_dim)(input_first_picks))
+masking_first_pick_wins = Masking(mask_value=0.0)(Embedding(2, embedding_dim)(input_first_pick_wins))
+type_embedding = Dense(embedding_dim, activation='relu')(Masking(mask_value=0.0)(input_types))
+rule_embedding = RepeatVector(max_sequence_length)(Flatten()(Embedding(num_rules, 32)(input_rule)))
 
-    for i in range(1, len(picks_sequence)):
-        sequences.append(picks_sequence[:i])
-        labels.append(picks_sequence[i])
-        pick_orders.append(pick_order_sequence[:i])
-        team_sequences.append(team_sequence[:i])
-        type_sequences.append(type_sequence[:i])
-        first_pick_sequences.append(first_pick_sequence[:i])
-        first_pick_win_sequences.append(first_pick_win_sequence[:i])
-
-unique_type_values = np.unique(np.concatenate(type_sequences))
-print("Unique values in type_sequences before padding:", unique_type_values)
-
-# Pad sequences
-max_sequence_length = max(len(seq) for seq in sequences)
-print(f"Max sequence length: {max_sequence_length}")
-X_heroes = pad_sequences(sequences, maxlen=max_sequence_length, padding='pre')
-X_pick_orders = pad_sequences(pick_orders, maxlen=max_sequence_length, padding='pre')
-X_teams = pad_sequences(team_sequences, maxlen=max_sequence_length, padding='pre')
-X_first_picks = pad_sequences(first_pick_sequences, maxlen=max_sequence_length, padding='pre')
-# Convert lists to numpy arrays and pad sequences
-X_first_pick_wins = pad_sequences(first_pick_win_sequences, maxlen=max_sequence_length, padding='pre')
-
-# Pad type sequences differently because each entry is a list of multi-hot vectors
-#X_types = pad_sequences(type_sequences, maxlen=max_sequence_length, padding='pre', dtype=object, value=[0]*len(type_encoder.classes_))
-# Convert lists of multi-hot vectors to numpy array
-#X_types = np.array([np.stack(x) for x in X_types], dtype=np.float32)
-
-# Convert lists of multi-hot vectors to numpy array
-X_types = pad_sequences([np.array(x) for x in type_sequences], maxlen=max_sequence_length, padding='pre', dtype='float32')
-
-y = to_categorical(labels, num_classes=len(hero_encoder.classes_))
-y_win = np.array([sequence[0] for sequence in first_pick_win_sequences])
-
-# Parameters
-num_heroes = len(hero_encoder.classes_)
-num_types = len(type_encoder.classes_)
-embedding_dim = 512  # Experiment with 128, 256, 512
-lstm_units = 256  # Reduced to match the subsequent attention mechanism
-
-# Preprocessing Step: Clip values to ensure indices are within bounds
-X_heroes = np.clip(X_heroes, 0, num_heroes - 1)
-X_pick_orders = np.clip(X_pick_orders, 0, max_sequence_length - 1)
-X_teams = np.clip(X_teams, 0, len(team_encoder.classes_) - 1)
-X_first_picks = np.clip(X_first_picks, 0, len(first_pick_encoder.classes_) - 1)
-X_first_pick_wins = np.clip(X_first_pick_wins, 0, max_sequence_length - 1)
-
-# Build the model
-input_heroes = Input(shape=(max_sequence_length,))
-input_pick_orders = Input(shape=(max_sequence_length,))
-input_teams = Input(shape=(max_sequence_length,))
-input_types = Input(shape=(max_sequence_length, num_types))
-input_first_picks = Input(shape=(max_sequence_length,))
-# Define input layers
-input_first_pick_wins = Input(shape=(max_sequence_length,))
-
-hero_embedding = Embedding(input_dim=num_heroes, output_dim=embedding_dim, input_length=max_sequence_length)(input_heroes)
-masking_heroes = Masking(mask_value=0.0)(hero_embedding)
-
-pick_order_embedding = Embedding(input_dim=max_sequence_length, output_dim=embedding_dim, input_length=max_sequence_length)(input_pick_orders)
-masking_orders = Masking(mask_value=0.0)(pick_order_embedding)
-
-team_embedding = Embedding(input_dim=len(team_encoder.classes_), output_dim=embedding_dim, input_length=max_sequence_length)(input_teams)
-masking_teams = Masking(mask_value=0.0)(team_embedding)
-
-first_pick_embedding = Embedding(input_dim=len(first_pick_encoder.classes_), output_dim=embedding_dim, input_length=max_sequence_length)(input_first_picks)
-masking_first_picks = Masking(mask_value=0.0)(first_pick_embedding)
-
-# Define embeddings for the new inputs
-first_pick_win_embedding = Embedding(input_dim=2, output_dim=embedding_dim, input_length=max_sequence_length)(input_first_pick_wins)
-# Apply masking
-masking_first_pick_wins = Masking(mask_value=0.0)(first_pick_win_embedding)
-
-# Apply Masking before Dense layer for types
-masking_types = Masking(mask_value=0.0)(input_types)
-type_embedding = Dense(embedding_dim, activation='relu')(masking_types)
-#masking_types = Masking(mask_value=0.0)(type_embedding)
-
-# Concatenate all inputs
-concatenated = Concatenate()([masking_heroes, masking_orders, masking_teams, masking_first_picks, type_embedding, masking_first_pick_wins])
-concatenated_win = Concatenate()([masking_heroes, masking_orders, masking_teams, masking_first_picks, type_embedding])
-def check_indices(data, max_index):
-    if np.any(data >= max_index):
-        print(f"Error: Found indices out of range in data. Max index allowed: {max_index - 1}")
-        return False
-    return True
-
-# Check indices for each input array
-if not check_indices(X_heroes, num_heroes):
-    print("Invalid indices in X_heroes")
-if not check_indices(X_pick_orders, max_sequence_length):
-    print("Invalid indices in X_pick_orders")
-if not check_indices(X_teams, len(team_encoder.classes_)):
-    print("Invalid indices in X_teams")
-if not check_indices(X_first_picks, len(first_pick_encoder.classes_)):
-    print("Invalid indices in X_first_picks")
-if not check_indices(X_types, num_types):
-    print("Invalid indices in X_types")
-
+concatenated = Concatenate()([masking_heroes, masking_orders, masking_teams, masking_first_picks, type_embedding,
+                              masking_first_pick_wins, rule_embedding])
+concatenated_win = Concatenate()([masking_heroes, masking_orders, masking_teams, masking_first_picks,
+                                  type_embedding, rule_embedding])
 
 lstm_out1 = LSTM(512, return_sequences=True)(concatenated)
 attention = Attention(name='attention_weight')(lstm_out1)
-output = Dense(num_heroes, activation='softmax')(attention)
+output = Dense(num_heroes, activation='softmax', name='next_hero')(attention)
 
 lstm_out2 = LSTM(128, return_sequences=True)(concatenated_win)
 attention_win = Attention(name='attention_win_weight')(lstm_out2)
@@ -209,36 +158,27 @@ win_hidden = Dense(64, activation='relu', kernel_regularizer=l2(0.01))(attention
 win_hidden = Dropout(0.5)(win_hidden)
 win_output = Dense(1, activation='sigmoid', name='win_output')(win_hidden)
 
-model = Model([input_heroes, input_pick_orders, input_teams, input_first_picks, input_types, input_first_pick_wins], [output, win_output])
+# Input order matches search_server.py: heroes, orders, teams, first picks, types, first pick wins, rule
+model = Model([input_heroes, input_pick_orders, input_teams, input_first_picks, input_types,
+               input_first_pick_wins, input_rule], [output, win_output])
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=args.lr),
+    loss={'next_hero': 'sparse_categorical_crossentropy', 'win_output': 'binary_crossentropy'},
+    metrics={'next_hero': ['accuracy',
+                         tf.keras.metrics.SparseTopKCategoricalAccuracy(k=3, name='top_3_accuracy'),
+                         tf.keras.metrics.SparseTopKCategoricalAccuracy(k=5, name='top_5_accuracy'),
+                         tf.keras.metrics.SparseTopKCategoricalAccuracy(k=10, name='top_10_accuracy')],
+             'win_output': ['accuracy']})
 
-optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=0.0001)
-    
-model.compile(loss={'dense_1': 'categorical_crossentropy', 'win_output': 'binary_crossentropy'},
-               optimizer=optimizer, 
-              metrics={'dense_1':['accuracy',
-                       tf.keras.metrics.TopKCategoricalAccuracy(k=3, name='top_3_accuracy'),
-                       tf.keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy'),
-                       tf.keras.metrics.TopKCategoricalAccuracy(k=10, name='top_10_accuracy')],
-                       'win_output':['accuracy']})
-    
-# Callbacks
-checkpoint_filepath = 'data/rec_model.h5'
-model_checkpoint_callback = ModelCheckpoint(filepath=checkpoint_filepath, save_best_only=True, monitor='val_loss', mode='min')
-early_stopping = EarlyStopping(monitor='val_loss', patience=0)
-#learning_rate_scheduler = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=0.00001)
-# Save encoders
-with open('data/rec_variables.pkl', 'wb') as f:
-    pickle.dump([type_encoder, hero_encoder, max_sequence_length], f)
+# Save encoders; the rule encoder is a fourth entry (search_server.py accepts files with or without it)
+with open(VARIABLES_PATH, 'wb') as f:
+    pickle.dump([type_encoder, hero_encoder, max_sequence_length, rule_encoder], f)
 
-# Train the model
-batch_size = 64
-epochs = 500
-history = model.fit([X_heroes, X_pick_orders, X_teams, X_first_picks, X_types, X_first_pick_wins], 
-                    {'dense_1': y, 'win_output': y_win}, batch_size=batch_size, epochs=epochs, 
-                    validation_split=0.2, 
-                    callbacks=[model_checkpoint_callback, early_stopping])
+model.fit(train_ds, validation_data=val_ds, epochs=args.epochs, verbose=2,
+          callbacks=[ModelCheckpoint(MODEL_PATH, save_best_only=True, monitor='val_loss', mode='min'),
+                     EarlyStopping(monitor='val_loss', patience=args.patience)])
 
-# Save model without optimizer
-model = tf.keras.models.load_model('data/rec_model.h5', custom_objects={'Attention': Attention})
-keras.models.save_model(model, "data/rec_model.h5", include_optimizer=False)
-
+# Save the best epoch without optimizer state (smaller file)
+model = tf.keras.models.load_model(MODEL_PATH, custom_objects={'Attention': Attention})
+tf.keras.models.save_model(model, MODEL_PATH, include_optimizer=False)
+print(f'Saved {MODEL_PATH} and {VARIABLES_PATH}')

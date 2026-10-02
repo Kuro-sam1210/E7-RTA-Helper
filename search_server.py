@@ -283,7 +283,7 @@ win_rates = {}
 
 @app.route('/init_recommender', methods=['GET'])
 def init_recommender():
-    global type_encoder, hero_encoder, max_sequence_length, model, hero_types, hero_type_dict, available_heroes, most_picked, ban_recommender
+    global type_encoder, hero_encoder, max_sequence_length, model, hero_types, hero_type_dict, available_heroes, most_picked, ban_recommender, rule_encoder
     try:
         # Optional post-draft ban model; picks still work without it
         try:
@@ -293,7 +293,10 @@ def init_recommender():
             ban_recommender = None
 
         with open('data/rec_variables.pkl', 'rb') as f:
-            type_encoder, hero_encoder, max_sequence_length = pickle.load(f)
+            variables = pickle.load(f)
+        # Newer models also take the warfare rule (a fourth, optional entry)
+        type_encoder, hero_encoder, max_sequence_length = variables[:3]
+        rule_encoder = variables[3] if len(variables) > 3 else None
         model = tf.keras.models.load_model('data/rec_model.h5', custom_objects={'Attention': Attention})
         hero_types = pd.read_csv('data/hero_types.csv')
         hero_types['type_list'] = hero_types['type'].apply(ast.literal_eval)
@@ -347,7 +350,7 @@ def process_picks(first_team_picks, non_first_team_picks):
 
     return first_team_picks, non_first_team_picks
 
-def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, prebans=()):
+def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, prebans=(), rule=None):
     combined_sequence = []
     combined_types = []
     first_pick_index = [0, 3, 4, 7, 8]
@@ -475,7 +478,12 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
     print("padded_first_pick_sequence:", padded_first_pick_sequence.shape)
     print("padded_types_sequence:", padded_types_sequence.shape)
     
-    prediction, win_prediction = model.predict([padded_sequence, padded_order_sequence, padded_team_sequence, padded_first_pick_sequence, padded_types_sequence, X_first_pick_wins])
+    model_inputs = [padded_sequence, padded_order_sequence, padded_team_sequence, padded_first_pick_sequence, padded_types_sequence, X_first_pick_wins]
+    # Models trained with the warfare rule take it as a seventh input
+    if len(model.inputs) > len(model_inputs):
+        known_rule = rule if rule_encoder is not None and rule in rule_encoder.classes_ else 'unknown'
+        model_inputs.append(np.array([[rule_encoder.transform([known_rule])[0] if rule_encoder is not None else 0]]))
+    prediction, win_prediction = model.predict(model_inputs)
 
     # Picked and prebanned heroes (prebans remove a hero for both players) cannot be suggested
     combined_hero_indices = set(picks_sequence_encoded)
@@ -517,7 +525,7 @@ def recommend_characters():
             available_characters = set(data['Hero'].unique()) - set(user_picks) - set(enemy_picks)
             
         prebans = [h for h in request.args.get('prebans', '').split(',') if h]
-        result = predict_next_hero(enemy_picks, user_picks, first_pick_team, prebans)
+        result = predict_next_hero(enemy_picks, user_picks, first_pick_team, prebans, request.args.get('rule'))
         return result
     
     except Exception as e:
@@ -527,6 +535,7 @@ def recommend_characters():
 
 
 ban_recommender = None
+rule_encoder = None
 
 @app.route('/recommend_ban', methods=['GET'])
 def recommend_ban():
