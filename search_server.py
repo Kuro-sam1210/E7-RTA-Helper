@@ -24,7 +24,7 @@ import pickle
 import tensorflow as tf
 from attention import Attention
 import ast
-from ban_recommender import BanRecommender
+from win_model import WinModel
 
 # For updating
 from packaging.version import Version
@@ -283,14 +283,14 @@ win_rates = {}
 
 @app.route('/init_recommender', methods=['GET'])
 def init_recommender():
-    global type_encoder, hero_encoder, max_sequence_length, model, hero_types, hero_type_dict, available_heroes, most_picked, ban_recommender, rule_encoder
+    global type_encoder, hero_encoder, max_sequence_length, model, hero_types, hero_type_dict, available_heroes, most_picked, win_model, rule_encoder
     try:
-        # Optional post-draft ban model; picks still work without it
+        # Optional win model (win bar and ban suggestions); picks still work without it
         try:
-            ban_recommender = BanRecommender.load_if_available()
+            win_model = WinModel.load_if_available()
         except Exception as e:
-            logging.error(f"Could not load ban model: {str(e)}")
-            ban_recommender = None
+            logging.error(f"Could not load win model: {str(e)}")
+            win_model = None
 
         with open('data/rec_variables.pkl', 'rb') as f:
             variables = pickle.load(f)
@@ -351,6 +351,8 @@ def process_picks(first_team_picks, non_first_team_picks):
     return first_team_picks, non_first_team_picks
 
 def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, prebans=(), rule=None):
+    # Picks as detected, before heroes the pick model does not know become 'unknown'
+    win_model_teams = ([h for h in user_team_picks if h][:5], [h for h in enemy_team_picks if h][:5])
     combined_sequence = []
     combined_types = []
     first_pick_index = [0, 3, 4, 7, 8]
@@ -374,7 +376,7 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
         most_picks = [h for h in most_picked if h not in prebans][:10]
         return jsonify({
         'top_10_heroes': most_picks,
-        'win_prediction': str(50.0)
+        'win_prediction': str(0.5)
         }), 200
 
     elif first_pick_team == 'Enemy Team' and len(enemy_team_picks) == 0:
@@ -382,7 +384,7 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
         most_picks = [h for h in most_picked if h not in prebans][:10]
         return jsonify({
         'top_10_heroes': most_picks,
-        'win_prediction': str(50.0)
+        'win_prediction': str(0.5)
         }), 200
 
     # Get only the first 5 in enemy and user picks
@@ -493,16 +495,22 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
 
     top_10_heroes = hero_encoder.inverse_transform(filtered_top_10_indices)
 
+    # Our win rate: from the win model when available, else the pick model's own win output
+    if win_model is not None:
+        user_win = win_model.win_rate(*win_model_teams, first_pick_team == 'My Team', rule)
+    else:
+        user_win = win_prediction[0][0] if first_pick_team == 'My Team' else 1.0 - win_prediction[0][0]
+
     # if both are full, return only win prediction
     if len(user_team_picks) >= 5 and len(enemy_team_picks) >= 5:
         return jsonify({
         'top_10_heroes': [],
-        'win_prediction': str(win_prediction[0][0]) if first_pick_team == 'My Team' else str(1.0-win_prediction[0][0])
+        'win_prediction': str(user_win)
         }), 200
 
     return jsonify({
         'top_10_heroes': top_10_heroes.tolist(),
-        'win_prediction': str(win_prediction[0][0]) if first_pick_team == 'My Team' else str(1.0-win_prediction[0][0])
+        'win_prediction': str(user_win)
     }), 200
 
 @app.route('/recommend', methods=['GET'])
@@ -534,7 +542,7 @@ def recommend_characters():
         return jsonify({"message": f"Error: {str(e)}"}), 500
 
 
-ban_recommender = None
+win_model = None
 rule_encoder = None
 
 @app.route('/recommend_ban', methods=['GET'])
@@ -544,13 +552,13 @@ def recommend_ban():
     Params: user_picks, enemy_picks (comma separated), first_pick_team ('My Team' or 'Enemy Team'),
     optional rule (e.g. rta_openingrule_category_4), user_banned and enemy_banned once known.
     """
-    if ban_recommender is None:
-        return jsonify({"message": "Ban model is not available"}), 503
+    if win_model is None:
+        return jsonify({"message": "Win model is not available"}), 503
     try:
         user_picks = [h for h in request.args.get('user_picks', '').split(',') if h]
         enemy_picks = [h for h in request.args.get('enemy_picks', '').split(',') if h]
         user_first_pick = request.args.get('first_pick_team') == 'My Team'
-        result = ban_recommender.recommend(
+        result = win_model.recommend_bans(
             user_picks[:5], enemy_picks[:5], user_first_pick,
             rule=request.args.get('rule'),
             user_banned=request.args.get('user_banned'),
