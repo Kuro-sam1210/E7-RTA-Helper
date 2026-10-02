@@ -118,11 +118,13 @@ func _on_sc_request_completed(result, response_code, headers, body):
 
 func _on_wr_request_completed(result, response_code, headers, body):
 	if response_code == 200:
-		windows = JSON.parse_string(body.get_string_from_utf8().replace("'",'"'))
-		#windows = body.get_string_from_utf8().split(",")
-		
+		# The server sends a JSON list; titles may contain quotes (e.g. a Discord chat named @'name)
+		windows = JSON.parse_string(body.get_string_from_utf8())
+		if windows == null:
+			windows = []
+
 		for window in windows:
-			window_selector.add_item(window)
+			window_selector.add_item(str(window))
 
 	else:
 		print(body.get_string_from_utf8())
