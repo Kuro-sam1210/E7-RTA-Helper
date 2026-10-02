@@ -158,6 +158,24 @@ def find_prebans(band, height):
         split = len([x for x, _ in icons if x < band.shape[1] / 2])
     return [hero for _, hero in icons[:split]][:2], [hero for _, hero in icons[split:]][:2]
 
+# Preban icons are about 7% of the window height; below this height they are too small
+# for the 112 px portrait templates, so the band is enlarged first
+PREBAN_FULL_SIZE_HEIGHT = 1100
+
+def find_prebans_any_size(band, height):
+    """find_prebans at two zoom levels for small windows, combining what each side finds."""
+    if height >= PREBAN_FULL_SIZE_HEIGHT:
+        return find_prebans(band, height)
+    base = PREBAN_FULL_SIZE_HEIGHT / height
+    user, enemy = [], []
+    # Each zoom level misses different icons, so use both
+    for factor in (base, base * 1.35):
+        scaled = cv2.resize(band, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
+        found_user, found_enemy = find_prebans(scaled, height * factor)
+        user += [hero for hero in found_user if hero not in user]
+        enemy += [hero for hero in found_enemy if hero not in enemy]
+    return user[:2], enemy[:2]
+
 def SIFT_feature_matching(target_gray, descriptors_target, keypoints_target, character, template_index):  
 		keypoints_template_normal, descriptors_template_normal, keypoints_template_flipped, descriptors_template_flipped = descriptor_cache[character][template_index]
           
@@ -230,15 +248,18 @@ def _test_SIFT_feature_matching():
     crop_top = int(height * (crop_top_percent / 100))
 
     target_image = target_image[crop_top:-crop_bottom, crop_left:-crop_right]
-    return jsonify(detect_draft(target_image, crop_middle))
+    # The app sends skip_prebans=1 once it has all four for this draft
+    return jsonify(detect_draft(target_image, crop_middle, request.args.get('skip_prebans') == '1'))
 
-def detect_draft(target_image, crop_middle=0):
+def detect_draft(target_image, crop_middle=0, skip_prebans=False):
     """Heroes in each team's slots (top to bottom), banned slots and prebans on a draft screen."""
     height, width = target_image.shape[:2]
 
     # Prebans sit at the bottom centre, which the middle crop below removes
-    preban_band = cv2.cvtColor(target_image[int(height * PREBAN_ZONE):], cv2.COLOR_BGR2GRAY)
-    user_prebans, enemy_prebans = find_prebans(preban_band, height)
+    user_prebans, enemy_prebans = [], []
+    if not skip_prebans:
+        preban_band = cv2.cvtColor(target_image[int(height * PREBAN_ZONE):], cv2.COLOR_BGR2GRAY)
+        user_prebans, enemy_prebans = find_prebans_any_size(preban_band, height)
 
     # Crop middle
     middle = width // 2

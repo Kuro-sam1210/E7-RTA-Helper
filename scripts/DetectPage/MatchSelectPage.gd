@@ -42,6 +42,7 @@ var full_enemy_team = []
 var full_enemy_y = []
 var user_banned = ""
 var enemy_banned = ""
+var draft_had_picks = false
 
 # Check if paused
 var paused = false
@@ -147,6 +148,9 @@ func _process(_delta):
 		# Reset DetectOutput
 		DetectOutput = {}
 		var url = "http://127.0.0.1:"+str(GlobalVars.port)+"/detect_enemy?title="+title.uri_encode()+"&crops="+CropTopValue+","+CropBotValue+","+CropRightValue+","+CropLeftValue+","+CropCenterValue
+		# Preban detection is the slow part; skip it once all four are known for this draft
+		if prebans.size() >= 4:
+			url += "&skip_prebans=1"
 		if http_request.get_http_client_status() == 0:
 			http_request.request(url)
 			request_done = false # Stop request call until the detection finishes
@@ -215,9 +219,17 @@ func apply_draft_memory(output: Dictionary) -> bool:
 	var user_team = output['user_team']
 	var enemy_team = output['enemy_team']
 	var seen_prebans = output.get('user_prebans', []) + output.get('enemy_prebans', [])
+	var no_picks = user_team.is_empty() and enemy_team.is_empty()
 
-	# Left the draft screen: forget this draft
-	if user_team.is_empty() and enemy_team.is_empty() and seen_prebans.is_empty():
+	# Left the draft screen: forget this draft. Once all prebans are known the server stops
+	# looking for them, so then only picks disappearing (after there were some) ends the draft.
+	var draft_over = no_picks and seen_prebans.is_empty()
+	if prebans.size() >= 4:
+		draft_over = no_picks and draft_had_picks
+	if not no_picks:
+		draft_had_picks = true
+	if draft_over:
+		draft_had_picks = false
 		prebans = []
 		full_user_team = []
 		full_user_y = []
