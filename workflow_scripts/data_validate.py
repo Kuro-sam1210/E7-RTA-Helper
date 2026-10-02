@@ -12,34 +12,28 @@ def validate_matches():
     # Load the data
     matches = pd.read_csv('data/epic7_match_history.csv.gz')
 
-    # Group by match number
-    match_group = matches.groupby('Match Number')
-    invalid_matches = []
-    for match, group in match_group:
-        if group['Pick Order'].nunique() != 10:
-            logging.error(f'Removing: Match {match} does not have 10 heroes!\n')
-            invalid_matches.append(match)
-
-        characters_used = set()
-        for i in range(1, 11):
-            pick = group[group['Pick Order'] == i]
-            if not pick.empty:
-                current_char = pick['Hero'].values[0]
-                if current_char in characters_used:
-                    logging.error(f'Removing: Match {match} has a duplicate character!\n')
-                    invalid_matches.append(match)
-                    break
-
-                characters_used.add(current_char)
-
-        if group[group['Team'] == 'My Team']['Team'].value_counts().values[0] != 5 or\
-                group[group['Team'] == 'Enemy Team']['Team'].value_counts().values[0] != 5:
-                    logging.error(f'Removing: Match {match} does not have 5 characters on each teams!\n')
-                    invalid_matches.append(match)
+    # Same checks as before, computed for all matches at once (a per-match loop takes
+    # far too long at hundreds of thousands of matches)
+    per_match = matches.groupby('Match Number').agg(
+        picks=('Pick Order', 'nunique'),
+        heroes=('Hero', 'nunique'),
+        mine=('Team', lambda t: (t == 'My Team').sum()),
+        enemy=('Team', lambda t: (t == 'Enemy Team').sum()))
+    checks = {
+        'does not have 10 heroes': per_match['picks'] != 10,
+        'has a duplicate character': per_match['heroes'] != per_match['picks'],
+        'does not have 5 characters on each teams': (per_match['mine'] != 5) | (per_match['enemy'] != 5),
+    }
+    invalid = pd.Series(False, index=per_match.index)
+    for reason, failed in checks.items():
+        for match in per_match.index[failed]:
+            logging.error(f'Removing: Match {match} {reason}!\n')
+        invalid |= failed
 
     #now save the valid groups only
-    matches = matches[~matches['Match Number'].isin(invalid_matches)]
-    matches.to_csv('data/epic7_match_history.csv.gz', index=False)
+    if invalid.any():
+        matches = matches[~matches['Match Number'].isin(per_match.index[invalid])]
+        matches.to_csv('data/epic7_match_history.csv.gz', index=False)
 
 print('Running validation checks!')
 open('workflow_scripts/readme.md', 'w').close()

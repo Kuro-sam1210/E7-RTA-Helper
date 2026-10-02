@@ -53,25 +53,34 @@ jobs:
       - name: "Run script: Get hero descriptions"
         run: |
           python workflow_scripts/get_hero_description.py
-      - name: "Run script: Get hero official stats"
-        run: |
-          python workflow_scripts/get_hero_official_stats.py
-      - name: "Run script: Get matches"
-        run: |
-          python workflow_scripts/get_matches.py
-      - name: "Run script: Calculate hero stats"
-        run: |
-          python workflow_scripts/get_hero_stats.py
       - name: "Run script: Get hero types"
         run: |
           python workflow_scripts/get_hero_types.py
+      # The battle cache (match_histories/battles_v2_<season>.jsonl) is too large for git;
+      # keep it between runs so each run adds to the season's matches instead of replacing them
+      - name: Restore battle cache
+        uses: actions/cache@v4
+        with:
+          path: match_histories/battles_v2_*.jsonl
+          key: battles-${{ github.run_id }}
+          restore-keys: battles-
+      - name: "Run script: Get matches"
+        run: |
+          python workflow_scripts/get_matches.py
+      # Both stats scripts are computed from the matches
+      - name: "Run script: Get hero official stats"
+        run: |
+          python workflow_scripts/get_hero_official_stats.py
+      - name: "Run script: Calculate hero stats"
+        run: |
+          python workflow_scripts/get_hero_stats.py
 
       - name: Commit and push changes
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           DATE=$(date +"%Y-%m-%d")
-          git add .
+          git add data/ dataset/ CharacterUI/
           git commit -m "Update Data by GitHub Actions on $DATE"
           git push
         env:

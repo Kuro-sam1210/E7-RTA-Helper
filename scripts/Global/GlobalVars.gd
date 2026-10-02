@@ -25,6 +25,7 @@ var isDetectionCache = false
 var isInitRecommender = false
 
 var user_data
+var search_error = ""
 
 var hero_data # Official hero stats from Epic7
 var hero_match_data # Calculated from match history
@@ -243,6 +244,8 @@ func _on_search_request_completed(result, response_code, headers, body):
 		json.parse(body.get_string_from_utf8())
 		var response = json.get_data()
 		user_data = ""
+		# Keep the server's explanation (player not found, no internet, ...) for the Set User page
+		search_error = str(response.get('message', '')) if response is Dictionary else ""
 		print(response)
 		print("Request failed with response code %d" % response_code)
 		

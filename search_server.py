@@ -52,7 +52,7 @@ def fetch_json_from_github():
 def update():
     repo_url = f'https://github.com/{UPDATE_REPO}.git'
     clone_dir = './repo'
-    folders_to_move = ['CharacterUI', 'dataset', 'data']
+    folders_to_move = ['CharacterUI', 'dataset', 'data', 'detection']
     destination = './'
 
     if os.path.exists(clone_dir):
@@ -65,10 +65,16 @@ def update():
 
     # Download only the latest version of the data folders, not the whole repository
     # (which includes ~1 GB of bundled Python)
-    repo = git.Repo.clone_from(repo_url, clone_dir, depth=1, branch=UPDATE_BRANCH,
-                               multi_options=['--filter=blob:none', '--no-checkout'])
-    repo.git.sparse_checkout('set', '--no-cone', *[f'/{folder}/' for folder in folders_to_move])
-    repo.git.checkout(UPDATE_BRANCH)
+    try:
+        repo = git.Repo.clone_from(repo_url, clone_dir, depth=1, branch=UPDATE_BRANCH,
+                                   multi_options=['--filter=blob:none', '--no-checkout'])
+        repo.git.sparse_checkout('set', '--no-cone', *[f'/{folder}/' for folder in folders_to_move])
+        repo.git.checkout(UPDATE_BRANCH)
+    except git.GitCommandError as e:
+        # sparse-checkout --no-cone needs Git 2.35+; older Git downloads the whole latest version
+        logging.error(f"Sparse update failed ({e}), downloading the full latest version instead")
+        shutil.rmtree(clone_dir, ignore_errors=True)
+        git.Repo.clone_from(repo_url, clone_dir, depth=1, branch=UPDATE_BRANCH)
 
     for folder in folders_to_move:
         # Full path of the folder to move
@@ -160,8 +166,6 @@ def search():
 
 
 # Function to recommend a hero
-# Load the CSV file
-data = pd.read_csv('data/epic7_match_history.csv.gz')
 win_rates = {}
 
 @app.route('/init_recommender', methods=['GET'])
@@ -406,13 +410,7 @@ def recommend_characters():
         except Exception:
             return jsonify({"message": "Please provide enemy_picks and user_picks and first_pick_team"}), 400
         
-        try:
-            available_characters = request.args.get('available_characters')
-            available_characters = available_characters.split(',')
-        except Exception:
-            available_characters = set(data['Hero'].unique()) - set(user_picks) - set(enemy_picks)
-            
-        prebans = [h for h in request.args.get('prebans', '').split(',') if h]
+        prebans =[h for h in request.args.get('prebans', '').split(',') if h]
         result = predict_next_hero(enemy_picks, user_picks, first_pick_team, prebans, request.args.get('rule'))
         return result
     

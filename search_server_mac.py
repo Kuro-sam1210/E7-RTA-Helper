@@ -280,10 +280,13 @@ win_rates = {}
 
 @app.route('/init_recommender', methods=['GET'])
 def init_recommender():
-    global type_encoder, hero_encoder, max_sequence_length, model, hero_types, hero_type_dict, available_heroes, most_picked
+    global type_encoder, hero_encoder, max_sequence_length, model, hero_types, hero_type_dict, available_heroes, most_picked, unknown_rule_id
     try:
         with open('data/rec_variables.pkl', 'rb') as f:
-            type_encoder, hero_encoder, max_sequence_length = pickle.load(f)
+            # Newer files add the warfare rule encoder as a fourth entry
+            variables = pickle.load(f)
+        type_encoder, hero_encoder, max_sequence_length = variables[:3]
+        unknown_rule_id = int(variables[3].transform(['unknown'])[0]) if len(variables) > 3 else 0
         model = tf.keras.models.load_model('data/rec_model.h5', custom_objects={'Attention': Attention})
         hero_types = pd.read_csv('data/hero_types.csv')
         hero_types['type_list'] = hero_types['type'].apply(ast.literal_eval)
@@ -465,7 +468,12 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team):
     print("padded_first_pick_sequence:", padded_first_pick_sequence.shape)
     print("padded_types_sequence:", padded_types_sequence.shape)
     
-    prediction, win_prediction = model.predict([padded_sequence, padded_order_sequence, padded_team_sequence, padded_first_pick_sequence, padded_types_sequence, X_first_pick_wins])
+    model_inputs = [padded_sequence, padded_order_sequence, padded_team_sequence, padded_first_pick_sequence, padded_types_sequence, X_first_pick_wins]
+    # Models trained with the warfare rule take it as a seventh input ('unknown' here: the
+    # Mac build has no rule selector; search_server.py has the full Windows support)
+    if len(model.inputs) > len(model_inputs):
+        model_inputs.append(np.array([[unknown_rule_id]]))
+    prediction, win_prediction = model.predict(model_inputs)
 
     combined_hero_indices = set(picks_sequence_encoded)
     top_10_indices = np.argsort(prediction[0])[::-1]

@@ -35,9 +35,13 @@ func _on_button_pressed():
 		$VBoxContainer/ErrorMessageLabel.visible = true
 		$VBoxContainer/ErrorMessageLabel.text = successful_string
 		
+		GlobalVars.search_error = ""
 		user_data = await GlobalVars.get_user_data(username, server)
 		if str(user_data) == "":
 			$VBoxContainer/ErrorMessageLabel.text = error_string
+			if GlobalVars.search_error != "":
+				# e.g. 'Error: No ranked player named "x" on Global'
+				$VBoxContainer/ErrorMessageLabel.text = "[center][color=red]" + GlobalVars.search_error.trim_prefix("Error: ") + "[/color][center]"
 		else:
 			SettingManager.config.set_value("Save", 'UserData', user_data)
 			SettingManager.save_config()

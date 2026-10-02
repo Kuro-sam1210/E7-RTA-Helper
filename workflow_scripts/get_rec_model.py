@@ -170,10 +170,6 @@ model.compile(
                          tf.keras.metrics.SparseTopKCategoricalAccuracy(k=10, name='top_10_accuracy')],
              'win_output': ['accuracy']})
 
-# Save encoders; the rule encoder is a fourth entry (search_server.py accepts files with or without it)
-with open(VARIABLES_PATH, 'wb') as f:
-    pickle.dump([type_encoder, hero_encoder, max_sequence_length, rule_encoder], f)
-
 model.fit(train_ds, validation_data=val_ds, epochs=args.epochs, verbose=2,
           callbacks=[ModelCheckpoint(MODEL_PATH, save_best_only=True, monitor='val_loss', mode='min'),
                      EarlyStopping(monitor='val_loss', patience=args.patience)])
@@ -181,4 +177,10 @@ model.fit(train_ds, validation_data=val_ds, epochs=args.epochs, verbose=2,
 # Save the best epoch without optimizer state (smaller file)
 model = tf.keras.models.load_model(MODEL_PATH, custom_objects={'Attention': Attention})
 tf.keras.models.save_model(model, MODEL_PATH, include_optimizer=False)
+
+# Save encoders only after training succeeded, so a crashed run never leaves the model and
+# encoders out of step. The rule encoder is a fourth entry (search_server.py accepts files
+# with or without it).
+with open(VARIABLES_PATH, 'wb') as f:
+    pickle.dump([type_encoder, hero_encoder, max_sequence_length, rule_encoder], f)
 print(f'Saved {MODEL_PATH} and {VARIABLES_PATH}')

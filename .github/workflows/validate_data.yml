@@ -9,7 +9,9 @@ on:
 
 jobs:
   run_script:
-    runs-on: ubuntu-latest 
+    # Only validate data that was updated successfully
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -26,10 +28,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r workflow_scripts/requirements.txt
 
-      - name: "Merge csvs"
-        run: |
-          python workflow_scripts/csv_merger.py
-
+      # (The old "Merge csvs" step archived uncompressed copies into match_histories/;
+      # get_matches.py now deduplicates battles itself through its cache.)
       - name: "Start Validation"
         run: |
           python workflow_scripts/data_validate.py
@@ -39,7 +39,7 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           DATE=$(date +"%Y-%m-%d")
-          git add .
+          git add data/ versions.json
           git commit -m "Check Data by GitHub Actions on $DATE"
           git push
         env:

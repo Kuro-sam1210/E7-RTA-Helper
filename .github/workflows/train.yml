@@ -1,5 +1,10 @@
 name: Train Model
 
+# The win model (win bar and ban suggestions) trains in minutes on a CPU runner, so it
+# retrains after every successful data validation. The pick model is too large for a CPU
+# runner at Champion+ dataset sizes: train it on a GPU with
+# workflow_scripts/colab_train_rec_model.ipynb and commit data/rec_model.h5 + rec_variables.pkl.
+
 on:
   workflow_dispatch:
   workflow_run:
@@ -9,7 +14,8 @@ on:
 
 jobs:
   run_script:
-    runs-on: macos-latest  # Use macOS runner
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -27,18 +33,17 @@ jobs:
           pip install -r workflow_scripts/tf_requirements.txt
           echo "TF_USE_LEGACY_KERAS=True" >> $GITHUB_ENV
 
-
-      - name: "Start Train"
+      - name: "Train win model"
         run: |
-          python workflow_scripts/get_rec_model.py
+          python workflow_scripts/get_win_model.py
 
       - name: Commit and push changes
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           DATE=$(date +"%Y-%m-%d")
-          git add .
-          git commit -m "Update Recommender Model by GitHub Actions on $DATE"
+          git add data/win_model.h5 data/win_model_heroes.json
+          git commit -m "Update win model by GitHub Actions on $DATE"
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.UPDATE_SECRET }}

@@ -80,8 +80,11 @@ def find_player(name, server):
     name = name.strip()
     try:
         users = _user_list(world)
-    except (requests.RequestException, ValueError):
-        users = []
+    except (requests.RequestException, ValueError) as e:
+        # A player number still works without the list; a name cannot be looked up
+        if name.isdigit():
+            return int(name), world
+        raise RuntimeError(f'Could not download the {server} player list, check your internet connection ({e})')
     matches = [u for u in users if u['nick_nm'].lower() == name.lower()]
     if matches:
         return int(matches[0]['nick_no']), world
