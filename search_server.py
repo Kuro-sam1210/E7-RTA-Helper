@@ -9,14 +9,8 @@ import win32gui
 import pandas as pd
 from CaptureScreen import capture_screen
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
-from selenium.webdriver.chrome.options import Options
 import time
+import e7_api
 
 # recommender imports
 from tensorflow.keras.preprocessing.sequence import pad_sequences
@@ -35,11 +29,6 @@ import shutil
 import os
 import stat
 from os import path
-# Function to send keys with a delay
-def send_keys_slowly(element, text, delay=0.1):
-    for char in text:
-        element.send_keys(char)
-        time.sleep(delay)
 
 app = Flask(__name__)
 
@@ -146,134 +135,19 @@ def check_update():
 
 @app.route('/search', methods=['GET'])
 def search():
+    """Set User Data: a player's most used heroes this season and results of their recent battles.
+
+    Params: name (in-game nickname, or player number) and server (Global, Korea, Asia, Europe, Japan).
+    """
     try:
-        # Initialize the Chrome driver
-        chrome_options = Options()
-        #chrome_options.add_argument("--headless")  # Enable headless mode
-        #chrome_options.add_argument("--disable-gpu")
-        #chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        driver = webdriver.Chrome(options=chrome_options)
-
-        # Navigate to the URL
-        driver.get("https://epic7.gg.onstove.com/en")
-
-        # Wait for the server option to be clickable and click it
-        wait = WebDriverWait(driver, 10)
-        server_option = wait.until(EC.element_to_be_clickable((By.CLASS_NAME, "server-option.selected-option")))
-        server_option.click()
-
-        # Wait for the dropdown to open
-        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "triangle-down.open")))
-
-        # Get all server options
-        server_elements = driver.find_elements(By.CSS_SELECTOR, "li.server-option")
-
-        # Initialize an empty dictionary to store the data
-        character_stats = {}
-        hero_data = []
-
-        server_index = 0
-
-        # Does player have data
-        player_has_data = True
-
-        # Name of the player
-        player_name = request.args.get('name')
-
-        # Server to search
-        server = request.args.get('server')
-
-        server_clicked = False
-
-        # Loop through each server element
-        for server_element in server_elements:
-            if not server_clicked and server_element.text.lower() != server.lower():
-                server_index += 1
-                continue
-
-            server_clicked = True
-            servers = driver.find_elements(By.CSS_SELECTOR, "li.server-option")
-            
-            # Click the current server element
-            servers[server_index].click()
-            server_index += 1
-
-            # Find and clear the search input
-            search_input = driver.find_element(By.CLASS_NAME, "search-input")
-            search_input.send_keys(Keys.CONTROL + "a")
-            search_input.send_keys(Keys.DELETE)
-            send_keys_slowly(search_input, player_name, delay=0.2)
-            time.sleep(2)
-            search_input.send_keys(Keys.ENTER)
-
-            # Check if there is no data
-            try:
-                wait.until(EC.presence_of_element_located((By.CLASS_NAME, "nodata-img")))
-            except TimeoutException:
-                pass
-            except Exception:
-                return jsonify({"message": f"Error: No data found"}), 500 
-
-            # Check if the battle list is present
-            try:
-                battle_list = wait.until(EC.presence_of_element_located((By.ID, "battleList")))
-            except TimeoutException:
-                return jsonify({"message": f"Error: No data found"}), 500 
-
-            #here instead of using the driver, selenium, can we use the beautifulsoup? there is nothing to interact with the page
-            
-            # Get the win/loss stats
-            win_loss = driver.find_element(By.CSS_SELECTOR, "div.wl-score").text
-            total_wins = int(win_loss.split('W')[0].strip())
-            total_losses = int(win_loss.split('W')[1].split('L')[0].strip())
-            win_rate = float(win_loss.split('(')[1].split('%')[0].strip())
-
-
-            # Locate all hero elements
-            heroes = driver.find_elements(By.CSS_SELECTOR, ".hero-list ul li")
-
-            # Loop through each hero element and extract the necessary data
-            for hero in heroes:
-                img = hero.find_element(By.CSS_SELECTOR, ".hero-img img")
-                code = img.get_attribute("alt")
-
-                name = hero.find_element(By.CSS_SELECTOR, ".name").text
-
-                score = hero.find_element(By.CSS_SELECTOR, ".score")
-                wins = score.find_element(By.CSS_SELECTOR, "span:nth-child(1)").text
-                losses = score.find_element(By.CSS_SELECTOR, "span:nth-child(2)").text
-                win_rate = score.find_element(By.CSS_SELECTOR, "span:nth-child(3)").text
-
-                hero_data.append({
-                    "code": code,
-                    "name": name,
-                    "wins": wins,
-                    "losses": losses,
-                    "win_rate": win_rate
-                })
-
-            # Get all battle information
-            battles = driver.find_elements(By.CSS_SELECTOR, "li.win.battle-info, li.lose.battle-info")
-            for battle in battles:
-                battle_type = "win" if "win" in battle.get_attribute("class") else "loss"
-                characters = battle.find_elements(By.CSS_SELECTOR, "ul.flex-vert.align-end li.pick-hero")
-
-                for character in characters:
-                    alt_text = character.find_element(By.TAG_NAME, "img").get_attribute("alt")
-                    if alt_text not in character_stats:
-                        character_stats[alt_text] = {"wins": 0, "losses": 0}
-
-                    if battle_type == "win":
-                        character_stats[alt_text]["wins"] += 1
-                    else:
-                        character_stats[alt_text]["losses"] += 1
-                        
-            break
-        return jsonify({"hero_data": hero_data, "character_stats": character_stats, "player_has_data": player_has_data})
+        nick_no, world = e7_api.find_player(request.args.get('name', ''), request.args.get('server', ''))
+        hero_names = dict(pd.read_csv('data/hero_code_to_name.csv').values)
+        return jsonify(e7_api.player_stats(nick_no, world, hero_names))
+    except e7_api.PlayerNotFound as e:
+        return jsonify({"message": f"Error: {str(e)}"}), 404
     except Exception as e:
         logging.error(f"Error: {str(e)}")
-        return jsonify({"message": f"Error: {str(e)}"}), 500 
+        return jsonify({"message": f"Error: {str(e)}"}), 500
 
 
 # Function to recommend a hero
@@ -600,7 +474,6 @@ def shutdown_server():
 @app.get('/shutdown')
 def shutdown():
     #shutdown_server()
-    driver.quit()
     os.kill(os.getpid(), 9)
     return jsonify({"message": "Server shutting down"}), 200
 

@@ -20,3 +20,6 @@ match_histories/battles_*.jsonl
 
 # Upload bundle for workflow_scripts/colab_train_rec_model.ipynb
 colab_bundle.zip
+
+# Player name lists downloaded by e7_api.py
+cache/
