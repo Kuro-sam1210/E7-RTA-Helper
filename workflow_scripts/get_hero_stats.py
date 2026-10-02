@@ -2,7 +2,7 @@ import pandas as pd
 from collections import defaultdict
 
 # Load your CSV data into a DataFrame
-df = pd.read_csv('data/epic7_match_history.csv')
+df = pd.read_csv('data/epic7_match_history.csv.gz')
 
 # Function to calculate winrates, counters, picks, and counters against
 def calculate_winrates_counters_and_counters_against(df):

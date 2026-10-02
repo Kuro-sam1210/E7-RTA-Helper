@@ -2,6 +2,7 @@ extends Node
 
 var http_request: HTTPRequest
 var misc_http_request: HTTPRequest
+var ban_http_request: HTTPRequest
 var thread: Thread
 
 @onready
@@ -25,6 +26,13 @@ var can_ask_rec = true
 
 # Check who is first pick
 var is_user_first_pick = true
+
+# Warfare rule of the match, e.g. rta_openingrule_category_4 ("" if not chosen)
+var rule = ""
+
+# Teams sent with the last recommendation request (comma separated codes)
+var last_user_team = ""
+var last_enemy_team = ""
 
 # Check if paused
 var paused = false
@@ -68,6 +76,11 @@ func _ready():
 	add_child(misc_http_request)
 	misc_http_request.request_completed.connect(self._on_misc_server_completed)
 
+	# make http request for post-draft ban suggestions
+	ban_http_request = HTTPRequest.new()
+	add_child(ban_http_request)
+	ban_http_request.request_completed.connect(self._on_ban_suggestions_completed)
+
 	#print(await GlobalVars.get_user_data('khhm'))
 	
 	SettingManager.update_data()
@@ -102,6 +115,8 @@ func _input(event):
 			
 			if misc_http_request.get_http_client_status() != 0:
 				misc_http_request.cancel_request()
+			if ban_http_request.get_http_client_status() != 0:
+				ban_http_request.cancel_request()
 			can_ask_rec = false
 			print('status: paused')
 			
@@ -139,16 +154,41 @@ func _on_misc_server_completed(result, response_code, headers, body):
 		print("Rec: " + str(Recommendation['win_prediction']))		
 		
 		$CanvasLayer/UserPickData.emit_signal('show_recommendation', Recommendation['top_10_heroes'])
-		
+
 		# Set Win Prediction
 		$CanvasLayer/MatchSelect/Container/ColorRect/WinPredictionBar.value = float(Recommendation['win_prediction'])*100
+
+		# Draft complete: no more picks to suggest, so ask for ban suggestions instead
+		if len(Recommendation['top_10_heroes']) == 0 and last_user_team.split(",").size() >= 5 and last_enemy_team.split(",").size() >= 5:
+			request_ban_suggestions()
 	else:
 		can_ask_rec = true	
 		print('rec error: '+ body.get_string_from_utf8())	
 		# If failed, then show no rec
 		$CanvasLayer/UserPickData.emit_signal('show_recommendation', [])
 		# Set Win Prediction to 50%
-		$CanvasLayer/MatchSelect/Container/ColorRect/WinPredictionBar.value = 50.0	
+		$CanvasLayer/MatchSelect/Container/ColorRect/WinPredictionBar.value = 50.0
+
+func request_ban_suggestions():
+	if ban_http_request.get_http_client_status() != 0:
+		ban_http_request.cancel_request()
+	var first_pick_team = "My Team" if is_user_first_pick else "Enemy Team"
+	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend_ban"+"?user_picks="+last_user_team+"&enemy_picks="+last_enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule
+	print('ban url: '+url)
+	ban_http_request.request(url)
+
+func _on_ban_suggestions_completed(result, response_code, headers, body):
+	if response_code != 200:
+		# Ban model missing or teams incomplete: keep the pick view as is
+		print('ban suggestion error: '+ body.get_string_from_utf8())
+		return
+	var json = JSON.new()
+	json.parse(body.get_string_from_utf8())
+	var Bans = json.get_data()
+	$CanvasLayer/UserPickData.emit_signal('show_ban_suggestions', Bans['ban_suggestions'], Bans['likely_enemy_bans'])
+	# Expected win rate once both sides make their best ban
+	$CanvasLayer/MatchSelect/Container/ColorRect/WinPredictionBar.value = float(Bans['win_prediction'])*100
+
 var index = 0
 func _on_detection_completed(result, response_code, headers, body):
 	print("Char Detection Completed!")
@@ -203,7 +243,9 @@ func _on_detection_completed(result, response_code, headers, body):
 				old_enemy_team = DetectOutput['enemy_team']
 				can_ask_rec = false
 				var first_pick_team = "My Team"if is_user_first_pick else "Enemy Team"
-				var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()
+				last_user_team = user_team
+				last_enemy_team = enemy_team
+				var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule
 				print('url: '+url)
 				misc_http_request.request(url)
 				
@@ -238,9 +280,20 @@ func _on_back_button_pressed():
 # First pick selector
 func _on_first_pick_selector_selected(index):
 	is_user_first_pick = index == 1
-	# Cancel rec request
+	force_new_recommendation()
+
+# Warfare rule selector: item ids are the rule category numbers
+func _on_rule_selector_selected(index):
+	var rule_id = $CanvasLayer/RuleSelector.get_item_id(index)
+	rule = "rta_openingrule_category_%d" % rule_id if rule_id > 0 else ""
+	force_new_recommendation()
+
+func force_new_recommendation():
+	# Cancel rec requests
 	if misc_http_request.get_http_client_status() != 0:
 		misc_http_request.cancel_request()
+	if ban_http_request.get_http_client_status() != 0:
+		ban_http_request.cancel_request()
 	# Force resubmit rec
 	can_ask_rec = true
 	old_user_team = []

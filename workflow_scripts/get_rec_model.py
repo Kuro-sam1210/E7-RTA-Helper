@@ -22,7 +22,7 @@ os.environ['TF_XLA_FLAGS'] = '--tf_xla_cpu_global_jit'
 tf.config.optimizer.set_jit(True)  # Enable XLA
 
 # Load data
-data = pd.read_csv('data/epic7_match_history.csv')
+data = pd.read_csv('data/epic7_match_history.csv.gz')
 hero_details = pd.read_csv('data/hero_types.csv')
 
 data = data.merge(hero_details, left_on='Hero', right_on='code', how='left')

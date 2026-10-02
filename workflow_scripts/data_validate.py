@@ -10,7 +10,7 @@ valid_group = []
 
 def validate_matches():
     # Load the data
-    matches = pd.read_csv('data/epic7_match_history.csv')
+    matches = pd.read_csv('data/epic7_match_history.csv.gz')
 
     # Group by match number
     match_group = matches.groupby('Match Number')
@@ -39,7 +39,7 @@ def validate_matches():
 
     #now save the valid groups only
     matches = matches[~matches['Match Number'].isin(invalid_matches)]
-    matches.to_csv('data/epic7_match_history.csv', index=False)
+    matches.to_csv('data/epic7_match_history.csv.gz', index=False)
 
 print('Running validation checks!')
 open('workflow_scripts/readme.md', 'w').close()

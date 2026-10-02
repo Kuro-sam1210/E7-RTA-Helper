@@ -275,7 +275,7 @@ def search():
 
 # Function to recommend a hero
 # Load the CSV file
-data = pd.read_csv('data/epic7_match_history.csv')
+data = pd.read_csv('data/epic7_match_history.csv.gz')
 win_rates = {}
 
 @app.route('/init_recommender', methods=['GET'])

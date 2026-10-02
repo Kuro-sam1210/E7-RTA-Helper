@@ -38,8 +38,33 @@ extends Node
 @onready var hero_data = GlobalVars.hero_data
 
 signal show_recommendation(recommendation: Array)
+signal show_ban_suggestions(ban_suggestions: Array, likely_enemy_bans: Array)
 signal show_counters(character: String)
 signal show_synergies(character: String)
+
+func set_hero_portrait(portrait, hero: String):
+	var image = Image.load_from_file('dataset/'+hero+'/c.png')
+	if image == null:
+		portrait.texture = load('res://UI/MatchSelect/unknown_hero.png')
+		return
+	var texture = ImageTexture.create_from_image(image)
+	texture.resource_name = 'dataset/'+hero+'/c.png'
+	portrait.texture = texture
+
+# After the draft the pick grid is free: the left column shows which enemy hero to ban
+# (our worst-case win rate if we ban it), the right column which of our heroes they will
+# likely ban (our win rate if they do)
+func on_show_ban_suggestions(ban_suggestions: Array, likely_enemy_bans: Array):
+	for portrait in portraits:
+		portrait.texture = load('res://UI/MatchSelect/unknown_hero.png')
+	for label in labels:
+		label.text = ""
+	for i in range(min(5, len(ban_suggestions))):
+		set_hero_portrait(portraits[i], str(ban_suggestions[i]['hero']))
+		labels[i].text = "BAN  WR %.1f%%" % (float(ban_suggestions[i]['worst_case_win_rate']) * 100)
+	for i in range(min(5, len(likely_enemy_bans))):
+		set_hero_portrait(portraits[i + 5], str(likely_enemy_bans[i]['hero']))
+		labels[i + 5].text = "RISK WR %.1f%%" % (float(likely_enemy_bans[i]['win_rate']) * 100)
 
 func on_show_recommendation(recommendation: Array):
 	# First reset all portraits and labels

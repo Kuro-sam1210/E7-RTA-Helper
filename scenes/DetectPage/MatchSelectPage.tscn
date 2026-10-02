@@ -77,10 +77,31 @@ popup/item_1/id = 1
 popup/item_2/text = "Enemy Team"
 popup/item_2/id = 2
 
+[node name="RuleSelector" type="OptionButton" parent="CanvasLayer"]
+anchors_preset = -1
+anchor_left = 0.364
+anchor_top = 0.497
+anchor_right = 0.526
+anchor_bottom = 0.523
+alignment = 1
+item_count = 5
+selected = 0
+popup/item_0/text = "Warfare Rule"
+popup/item_0/id = 0
+popup/item_1/text = "Offense"
+popup/item_1/id = 1
+popup/item_2/text = "Defense"
+popup/item_2/id = 2
+popup/item_3/text = "Resistance"
+popup/item_3/id = 4
+popup/item_4/text = "Special"
+popup/item_4/id = 6
+
 [node name="PauseScreen" parent="CanvasLayer" instance=ExtResource("6_sb56w")]
 top_level = true
 
 [connection signal="pressed" from="CanvasLayer/MatchSelect/Container/ColorRect/VBoxContainer/HBoxContainer/BackButton" to="." method="_on_back_button_pressed"]
 [connection signal="item_selected" from="CanvasLayer/FirstPickSelector" to="." method="_on_first_pick_selector_selected"]
+[connection signal="item_selected" from="CanvasLayer/RuleSelector" to="." method="_on_rule_selector_selected"]
 
 [editable path="CanvasLayer/MatchSelect"]

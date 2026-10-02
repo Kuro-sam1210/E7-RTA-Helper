@@ -1,299 +1,258 @@
+"""Collect high-ranked RTA matches into data/epic7_match_history.csv.gz.
+
+Uses the JSON API behind https://epic7.onstove.com/en/gg (no login needed):
+  - getWorldUserRankingDetail: per-server leaderboard (top 100, 10 per page)
+  - getBattleList: a player's last 100 battles for a season
+
+Players are crawled outward from every server's leaderboard: each battle names
+the opponent and their rank, and opponents at --min-grade or above are queued
+in turn, until --max-players have been fetched.
+
+Outputs:
+  data/epic7_match_history.csv.gz  Match Number, Pick Order (1-10, global draft order),
+                                   Match Result, Team, Hero, First Pick, Banned,
+                                   Rule (warfare rule, e.g. rta_openingrule_category_4)
+  data/epic7_match_prebans.csv.gz  Match Number, Team, Hero (2 prebans per team)
+
+Battles are cached in match_histories/battles_v2_<season>.jsonl, so re-running
+during the season keeps adding new battles, an interrupted run resumes without
+re-fetching players done that day, and the same battle seen from both players'
+histories is only counted once.
+
+Usage:
+  python workflow_scripts/get_matches.py                     # current season, Champion+
+  python workflow_scripts/get_matches.py --season pvp_rta_ss20 --max-players 1000
+"""
+import argparse
 import csv
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.firefox.service import Service
-#from webdriver_manager.firefox import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
+import gzip
+import json
+import os
 import time
-from selenium.webdriver.firefox.options import Options
-from datetime import datetime, timedelta
+from collections import deque
+from datetime import datetime, timezone
 
-# Initialize Chrome options
-chrome_options = Options()
-chrome_options.add_argument('--disable-dev-shm-usage')
-chrome_options.add_argument('--disable-gpu')
-chrome_options.add_argument('--headless')
-chrome_options.binary_location = r'/usr/bin/firefox-esr'
-def init_driver():
-    #print(ChromeService().install())
-    #ChromeService(ChromeDriverManager().install())
-    return webdriver.Firefox(service=Service('/usr/local/bin/geckodriver'), options=chrome_options)
+import requests
 
-# Initialize the Chrome driver
-driver = init_driver()
+API_URL = 'https://e7api.onstove.com/gameApi/'
+SERVERS = ['world_global', 'world_kor', 'world_asia', 'world_eu', 'world_jpn']
+RANKING_PAGES = 10  # leaderboard is top 100, 10 players per page
+GRADES = ['bronze', 'silver', 'gold', 'master', 'challenger', 'champion', 'warlord', 'emperor', 'legend']
 
-# Open the initial URL to establish session/cookies
-initial_url = 'https://epic7.onstove.com/en/gg/rank/server'
-driver.get(initial_url)
+# Global draft order: the first-pick team picks 1, 4-5, 8-9; the other team 2-3, 6-7, 10
+FIRST_PICK_ORDER = [1, 4, 5, 8, 9]
+SECOND_PICK_ORDER = [2, 3, 6, 7, 10]
 
-# Optionally, wait for the page to fully load
-WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+session = requests.Session()
+session.headers.update({
+    'Content-Type': 'application/json;charset=UTF-8',
+    'Origin': 'https://epic7.onstove.com',
+    'Referer': 'https://epic7.onstove.com/',
+    'User-Agent': 'E7-RTA-Helper data updater',
+})
 
-# Store data
-data = []
-total_matches = 0
 
-# Set to keep track of visited hero names
-visited_heroes = set()
-# Function to extract match data
-def extract_match_data(soup):
-    global total_matches
-    class_combinations = ['battle-info win', 'battle-info lose']
-    battle_info_elements = soup.find_all('li', class_=class_combinations)
-    #battle_info_elements = [battle_info_elements[i] for i in range(len(battle_info_elements)) if i not in clicked_button_indices]
-
-    #do only the first index but check it exists
-    if len(battle_info_elements) < 1:
-        return
-    
-    battle = battle_info_elements[current_index]
-    if 'win' in battle['class']:
-        battle_result = "Win"
-        enemy_result = "Loss"
-    else:
-        battle_result = "Loss"
-        enemy_result = "Win"
-
-    my_team = battle.find('div', class_='my-team w-100')
-    my_team_heroes = my_team.find_all('li', class_=['ban', 'pick-hero']) if my_team else []
-
-    #check if em.show.firstpick exists in my_team
-    first_pick = None
-    is_my_team_first = my_team.find('em', class_='show firstpick') is not None
-
-    enemy_team = battle.find('div', class_='enemy-team w-100')
-    enemy_team_heroes = enemy_team.find_all('li', class_=['ban', 'pick-hero']) if enemy_team else []
-
-    if is_my_team_first:
-        first_pick = 'My Team'
-    else:
-        first_pick = 'Enemy Team'
-
-    match_data = []
-
-    first_pick_index = [1,4,5,8,9]
-    second_pick_index = [2,3,6,7,10]
-    # My team hero is reversed
-    for hero in reversed(my_team_heroes):
-        hero_img = hero.find('img')
-        hero_code = hero_img['alt'] if hero_img else 'Unknown'
-        if hero_code == 'Unknown':
-            break
-        match_data.append({
-            'Match Number': total_matches,
-            'Match Result': battle_result,
-            'Team': 'My Team',
-            'Hero': hero_code,
-            'Pick Order': first_pick_index.pop(0) if first_pick == 'My Team' else second_pick_index.pop(0),
-            'First Pick': 1 if first_pick == 'My Team' else 0
-        })
-
-    for hero in enemy_team_heroes:
-        hero_img = hero.find('img')
-        hero_code = hero_img['alt'] if hero_img else 'Unknown'
-        if hero_code == 'Unknown':
-            break
-        match_data.append({
-            'Match Number': total_matches,
-            'Match Result': enemy_result,
-            'Team': 'Enemy Team',
-            'Hero': hero_code,
-            'Pick Order': first_pick_index.pop(0) if first_pick == 'Enemy Team' else second_pick_index.pop(0),
-            'First Pick': 1 if first_pick == 'Enemy Team' else 0
-        })
-    #check if match_data length is 10
-    if match_data and len(match_data) == 10:
-        total_matches += 1  # Increment only if there's match data
-        data.extend(match_data)
-
-# Function to save data to CSV
-def save_to_csv():
-    csv_file = 'data/epic7_match_history.csv'
-    with open(csv_file, mode='w', newline='', encoding='utf-8') as file:
-        writer = csv.DictWriter(file, fieldnames=['Match Number', 'Pick Order', 'Match Result', 'Team', 'Hero', 'First Pick'])
-        writer.writeheader()
-        for row in data:
-            writer.writerow(row)
-    print(f'Data has been successfully written to {csv_file}')
-
-# Restart threshold
-restart_threshold = 10
-
-# Timing control
-start_time = datetime.now()
-end_time = start_time + timedelta(hours=5)
-save_interval = timedelta(minutes=5)
-last_save_time = start_time
-
-# Track Server
-server_names = ['Global', 'Korea', 'Asia', 'Europe', 'Japan']
-#server_names = ['All Servers']
-current_server_name = server_names.pop(0)
-
-try:
-    global clicked_button_indices, current_index
-    heroes_processed = 0
-    main_failures = 0
-    failures = 0
-    while True:  # Infinite loop to keep scraping
+def call_api(endpoint, delay, retries=4, **params):
+    for attempt in range(retries):
         try:
-            current_time = datetime.now()
+            response = session.post(API_URL + endpoint, params={'lang': 'en', **params}, timeout=30)
+            data = response.json()
+            if data.get('code') == 0:
+                time.sleep(delay)
+                return data['value']
+            print(f'{endpoint} returned {data.get("code")}: {data.get("message")}')
+        except (requests.RequestException, ValueError) as e:
+            print(f'{endpoint} failed ({attempt + 1}/{retries}): {e}')
+        time.sleep(delay * (2 ** (attempt + 1)))
+    return None
 
-            '''
-            # Check if the 5-hour mark has been reached
-            if current_time >= end_time:
-                print("Reached the 5-hour mark. Exiting...")
-                break
-            '''
-            
-            # Save CSV every 5 minutes
-            if current_time - last_save_time >= save_interval:
-                save_to_csv()
-                last_save_time = current_time
 
-            # Restart the driver if the threshold is reached
-            if heroes_processed >= restart_threshold:
-                driver.close()
-                driver.quit()  # Quit the current driver
-                driver = init_driver()  # Start a new driver
-                driver.get(initial_url)
-                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-                heroes_processed = 0  # Reset the counter
+def get_current_season(delay):
+    seasons = call_api('getSeasonList', delay)['result_body']
+    return next(s['season_code'] for s in seasons if s['is_now_season'] == 1)
 
-            """
-            # server selection
-            current_active_server = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.select-box.grade div.option.selected"))).text
-            
-            if current_active_server != current_server_name:
-                # Iterate through all servers
-                server_option = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div.select-box.grade div.option.selected")))
-                server_option.click()
 
-                # Wait for the dropdown to open
-                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "triangle-down.open")))
+def get_top_players(server, season, delay):
+    players = []
+    for page in range(1, RANKING_PAGES + 1):
+        value = call_api('getWorldUserRankingDetail', delay, world_code=server,
+                         season_code=season, current_page=page)
+        if not value or not value['result_body']:
+            break
+        players.extend(p['nick_no'] for p in value['result_body'])
+    return players
 
-                # Get all server options
-                server_elements = driver.find_elements(By.CSS_SELECTOR, "div.select-box.grade.open ul li.option, div.select-box.grade.open ul li.option.active")
-                server_index = 0
-                for element in server_elements:
-                    if element.text == current_server_name:
-                        server_index = server_elements.index(element)
-                        print(f"Found server index: {server_index}")
-                        print(f"Current server name: {current_server_name}")
-                        break
-                
-                WebDriverWait(driver, 10).until(EC.element_to_be_clickable(server_elements[server_index]))
-                server_elements[server_index].click() # Click the next server
 
-                time.sleep(5)  # Wait for the page to load after clicking
-            """
+def hero_code(code):
+    return code.split('_')[0]
 
-            # Click through all elements with class 'hero-name'
-            hero_elements = WebDriverWait(driver, 10).until(EC.presence_of_all_elements_located((By.CLASS_NAME, 'hero-name')))
-            
-            for i, hero_element in enumerate(hero_elements):
-                try:
-                    hero_name = hero_element.text.strip()
-                    if hero_name in visited_heroes:
-                        continue  # Skip if hero name is already visited
-                    
-                    print(f'player {i}/{len(hero_elements)}')
-                    print('processing player: ' + hero_name)
-                    
-                    visited_heroes.add(hero_name)  # Mark hero name as visited
 
-                    hero_element.click()
-                    time.sleep(5)  # Wait for the page to load after clicking
+def parse_fragment(fragment, key):
+    """Several fields are JSON fragments such as '"my_team":[...]' or '"preban_list":[...]'."""
+    return json.loads('{' + fragment + '}')[key]
 
-                    # Click through all buttons on the hero page
-                    clicked_button_indices = []
-                    matches = 0
-                    while matches < 100:
-                        try:
-                            btn_details = WebDriverWait(driver, 10).until(EC.presence_of_all_elements_located((By.CLASS_NAME, 'btn-detail')))
-                            new_button_indices = [i for i in range(len(btn_details)) if i not in clicked_button_indices]
 
-                            if not new_button_indices:
-                                break  # No more buttons to click, exit loop
+def parse_team(team_info):
+    heroes = parse_fragment(team_info, 'my_team')
+    return [hero_code(h['hero_code']) for h in sorted(heroes, key=lambda h: h['pick_order'])]
 
-                            for index in new_button_indices:
-                                try:
-                                    matches += 1  # Increment match
-                                    clicked_button_indices.append(index)
-                                    current_index = index
-                                    #time.sleep(5)  # Wait for dynamic content to load
-                                    page_source = driver.page_source
-                                    soup = BeautifulSoup(page_source, 'html.parser')
-                                    extract_match_data(soup)
 
-                                    if matches >= 100:
-                                        break
+def banned_hero(deck):
+    return next((hero_code(h['hero_code']) for h in deck['hero_list'] if h.get('ban') == 1), None)
 
-                                    # Re-fetch the button elements after each click
-                                    btn_details = WebDriverWait(driver, 10).until(EC.presence_of_all_elements_located((By.CLASS_NAME, 'btn-detail')))
-                                except Exception as e:
-                                    print(f"Error clicking button: {e}")
 
-                            # Check if there are more match history to load
-                            load_more_button = WebDriverWait(driver, 10).until(
-                                EC.element_to_be_clickable((By.CLASS_NAME, 'loadMoreBtn')))
-                            load_more_button.click()
-                            time.sleep(2)  # Wait for additional content to load
-        
-                        except Exception as e:
-                            print(f"Error in main loop: {e}")
-                            break
+def parse_battle(battle):
+    """Reduce an API battle to the fields we keep, or None if it is incomplete."""
+    try:
+        my_team = parse_team(battle['teamBettleInfo'])
+        enemy_team = parse_team(battle['teamBettleInfoenemy'])
+        my_prebans = [hero_code(c) for c in parse_fragment(battle['prebanList'], 'preban_list')]
+        enemy_prebans = [hero_code(c) for c in parse_fragment(battle['prebanListEnemy'], 'preban_list')]
+        my_deck, enemy_deck = battle['my_deck'], battle['enemy_deck']
+    except (KeyError, TypeError, ValueError):
+        return None
+    if len(my_team) != 5 or len(enemy_team) != 5 or battle.get('iswin') not in (1, 2):
+        return None
 
-                    # Go back to the initial page to click the next hero
-                    driver.execute_script("window.history.go(-1)")  # Go back to the main page
-                    driver.refresh()  # Refresh the page
-                    time.sleep(2)  # Wait for the page to load after going back
+    my_first = any(h.get('first_pick') == 1 for h in my_deck['hero_list'])
+    enemy_first = any(h.get('first_pick') == 1 for h in enemy_deck['hero_list'])
+    if my_first == enemy_first:
+        return None
 
-                    heroes_processed += 1  # Increment the counter after processing a hero
+    return {
+        'battle_seq': battle['battle_seq'],
+        'date': battle.get('battle_day'),
+        'win': battle['iswin'] == 1,
+        'my_first_pick': my_first,
+        'my_team': my_team,
+        'enemy_team': enemy_team,
+        # the hero of that team that the other side banned after the draft
+        'my_banned': banned_hero(my_deck),
+        'enemy_banned': banned_hero(enemy_deck),
+        'my_prebans': my_prebans,
+        'enemy_prebans': enemy_prebans,
+        'rule': battle.get('opening_rule_title'),
+        'my_grade': battle.get('grade_code'),
+        'enemy_grade': battle.get('enemy_grade_code'),
+    }
 
-                except Exception as e:
-                    print(f"Error clicking hero element: {e}")
 
-            # Check if there are more heroes to load
-            try:
-                load_more_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.CLASS_NAME, 'loadMoreBtn')))
-                #load_more_button.click()
-                driver.execute_script("arguments[0].click();", load_more_button)
-                time.sleep(2)  # Wait for additional content to load
-                failures = 0  # Reset the failure counter
-            except Exception as e:
-                failures += 1
-                print(f"No more heroes to load: {e}")
+def load_cache(path, today):
+    """Cached battles, plus players already fetched today (so a later run refreshes them)."""
+    battles, done_players = {}, set()
+    if os.path.exists(path):
+        with open(path, encoding='utf-8') as file:
+            for line in file:
+                record = json.loads(line)
+                if 'done_player' in record:
+                    if record.get('day') == today:
+                        done_players.add(record['done_player'])
+                else:
+                    battles.setdefault(record['battle_seq'], record)
+    return battles, done_players
 
-                # Move to the next server if there are more servers to load
-                if failures >= 3 and len(server_names)>0:
-                    current_server_name = server_names.pop(0)
-                    failures = 0
 
-                # Exit if there are no more servers to load
-                elif failures >= 5 and len(server_names) == 0:
-                    print("No more heroes to load. Saving and Exiting...")
-                    save_to_csv()
-                    break
-        except Exception as e:
-            main_failures += 1
-            print(f"Failure when trying to search players: {e}")
-            driver.refresh()  # Refresh the page
+def write_csvs(battles, matches_path, prebans_path):
+    # Written gzip-compressed (.csv.gz) to stay under GitHub's file size limit; pandas reads it directly
+    with gzip.open(matches_path, 'wt', newline='', encoding='utf-8') as matches_file, \
+            gzip.open(prebans_path, 'wt', newline='', encoding='utf-8') as prebans_file:
+        matches = csv.DictWriter(matches_file, lineterminator='\n', fieldnames=[
+            'Match Number', 'Pick Order', 'Match Result', 'Team', 'Hero', 'First Pick', 'Banned', 'Rule'])
+        prebans = csv.DictWriter(prebans_file, lineterminator='\n', fieldnames=['Match Number', 'Team', 'Hero'])
+        matches.writeheader()
+        prebans.writeheader()
+        for match_number, battle in enumerate(sorted(battles.values(), key=lambda b: b['battle_seq'])):
+            sides = [('My Team', battle['my_team'], battle['win'], battle['my_first_pick'],
+                      battle['my_banned'], battle['my_prebans']),
+                     ('Enemy Team', battle['enemy_team'], not battle['win'], not battle['my_first_pick'],
+                      battle['enemy_banned'], battle['enemy_prebans'])]
+            for team, heroes, won, first, banned, team_prebans in sides:
+                order = FIRST_PICK_ORDER if first else SECOND_PICK_ORDER
+                for pick_order, hero in zip(order, heroes):
+                    matches.writerow({
+                        'Match Number': match_number,
+                        'Pick Order': pick_order,
+                        'Match Result': 'Win' if won else 'Loss',
+                        'Team': team,
+                        'Hero': hero,
+                        'First Pick': int(first),
+                        'Banned': int(hero == banned),
+                        'Rule': battle.get('rule') or '',
+                    })
+                for hero in team_prebans:
+                    prebans.writerow({'Match Number': match_number, 'Team': team, 'Hero': hero})
+    print(f'Wrote {len(battles)} matches to {matches_path} and {prebans_path}')
 
-            if main_failures >= 5:
-                print("No more players to load. Saving and Exiting...")
-                save_to_csv()
 
-except KeyboardInterrupt:
-    print("Manually interrupted")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--season', help='season code, e.g. pvp_rta_ss21 (default: current season)')
+    parser.add_argument('--servers', nargs='+', default=SERVERS, help='leaderboards to start the crawl from')
+    parser.add_argument('--min-grade', default='champion', choices=GRADES,
+                        help='only follow opponents at this rank or above')
+    parser.add_argument('--max-players', type=int, default=5000, help='players to fetch per run')
+    parser.add_argument('--delay', type=float, default=1.0, help='seconds between API calls')
+    parser.add_argument('--output', default='data/epic7_match_history.csv.gz')
+    parser.add_argument('--prebans-output', default='data/epic7_match_prebans.csv.gz')
+    parser.add_argument('--csv-only', action='store_true', help='rebuild the CSVs from the cache, no API calls')
+    args = parser.parse_args()
 
-finally:
-    # Close the driver
-    driver.quit()
+    if args.csv_only:
+        season = args.season or get_current_season(args.delay)
+        battles, _ = load_cache(f'match_histories/battles_v2_{season}.jsonl', None)
+        write_csvs(battles, args.output, args.prebans_output)
+        return
 
-    # Write the data to a CSV file
-    save_to_csv()
+    allowed_grades = set(GRADES[GRADES.index(args.min_grade):])
+    season = args.season or get_current_season(args.delay)
+    cache_path = f'match_histories/battles_v2_{season}.jsonl'
+    os.makedirs('match_histories', exist_ok=True)
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    battles, done_players = load_cache(cache_path, today)
+    print(f'Season {season}: {len(battles)} cached matches, {len(done_players)} players done today')
+
+    queue, queued = deque(), set()
+    for server in args.servers:
+        players = get_top_players(server, season, args.delay)
+        print(f'{server}: {len(players)} ranked players')
+        for nick_no in players:
+            if nick_no not in queued:
+                queue.append((nick_no, server))
+                queued.add(nick_no)
+
+    fetched = 0
+    with open(cache_path, 'a', encoding='utf-8') as cache:
+        while queue and fetched < args.max_players:
+            nick_no, server = queue.popleft()
+            if nick_no in done_players:
+                continue
+            value = call_api('getBattleList', args.delay, nick_no=nick_no,
+                             world_code=server, season_code=season)
+            fetched += 1
+            if value is None:
+                print(f'Skipping player {nick_no}, will retry next run')
+                continue
+            new = 0
+            for raw in value['result_body'].get('battle_list') or []:
+                if raw.get('season_code') != season:
+                    continue
+                opponent = raw.get('matchPlayerNicknameno')
+                if opponent and opponent not in queued and raw.get('enemy_grade_code') in allowed_grades:
+                    queue.append((opponent, raw.get('enemy_world_code') or server))
+                    queued.add(opponent)
+                battle = parse_battle(raw)
+                if battle and battle['battle_seq'] not in battles:
+                    battles[battle['battle_seq']] = battle
+                    cache.write(json.dumps(battle) + '\n')
+                    new += 1
+            cache.write(json.dumps({'done_player': nick_no, 'day': today}) + '\n')
+            cache.flush()
+            done_players.add(nick_no)
+            print(f'{fetched}/{args.max_players} ({server}): +{new} matches '
+                  f'(total {len(battles)}, queue {len(queue)})')
+
+    write_csvs(battles, args.output, args.prebans_output)
+
+
+if __name__ == '__main__':
+    main()

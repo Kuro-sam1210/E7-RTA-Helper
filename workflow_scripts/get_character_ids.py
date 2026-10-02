@@ -1,139 +1,164 @@
+"""Build data/hero_code_to_name.csv and the dataset/ portrait templates.
+
+Hero list: the official E7 hero JSON (same file epic7.onstove.com/en/gg uses).
+Portraits: official hero thumbnails, with E7 Codex (https://e7codex.com) as a
+fallback and as the source for skin portraits (it replaces the closed E7 Vault;
+its skin faces are byte-identical to the ones previously stored here).
+
+Each hero folder gets c.png (base) plus c_1.png, c_2.png, ... (skins), and a
+horizontally flipped copy of each, which is what server.py loads for SIFT.
+"""
 import csv
+import io
 import os
-import requests
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service as ChromeService
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 import time
-from selenium.webdriver.chrome.options import Options
 
-# Initialize Chrome options
-chrome_options = Options()
-chrome_options.add_argument('--disable-dev-shm-usage')
-chrome_options.add_argument('--disable-gpu')
-chrome_options.add_argument('--headless')
-
-# Initialize the Chrome driver
-driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=chrome_options)
-
-# Open the initial URL to establish session/cookies
-initial_url = 'https://epic7.onstove.com/en/gg/herorecord'
-driver.get(initial_url)
-
-WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div.filterlist-wrap ul li')))
-time.sleep(10) # For some reason some eleemnts are not loaded together causing errors
-
-# Create the 'dataset' directory if it doesn't exist
-os.makedirs('dataset', exist_ok=True)
-
-# Find all elements with class 'filterlist-wrap' (assuming this contains hero information)
-try:
-    # Wait until all hero elements are present
-    heros = WebDriverWait(driver, 10).until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'div.filterlist-wrap ul li')))
-    
-    # List to store hero data
-    hero_data = []
-
-    # Iterate through each hero element and extract hero code and name
-    for hero_element in heros:
-        try:
-            # Extract hero code (from img alt attribute)
-            hero_code = hero_element.find_element(By.TAG_NAME, 'img').get_attribute('alt')
-
-            # Extract hero name (from i tag)
-            hero_name = hero_element.find_element(By.TAG_NAME, 'i').text
-            
-            # Append to hero_data list as dictionary
-            hero_data.append({'code': hero_code, 'name': hero_name})
-            print(f"Found hero: {hero_code} - {hero_name}")
-            
-            # Create a new folder for the hero in the 'dataset' directory
-            hero_dir = os.path.join('dataset', hero_code)
-            os.makedirs(hero_dir, exist_ok=True)
-            
-            # Define the image URL and the local path
-            image_url = f'https://static.smilegatemegaport.com/event/live/epic7/guide/images/hero/{hero_code}_s.png'
-            image_path = os.path.join(hero_dir, 'c.png')
-            
-            # Download the image and save it locally
-            response = requests.get(image_url)
-            if response.status_code == 200:
-                with open(image_path, 'wb') as img_file:
-                    img_file.write(response.content)
-            else:
-                print(f"Failed to download image for {hero_code}")
-            
-        except Exception as e:
-            print(f"Error retrieving hero information: {e}")
-            continue  # Continue to next hero
-    
-    # Save data to CSV file
-    csv_file = 'data/hero_code_to_name.csv'
-    with open(csv_file, 'w', newline='', encoding='utf-8') as file:
-        writer = csv.DictWriter(file, fieldnames=['code', 'name'])
-        writer.writeheader()
-        writer.writerows(hero_data)
-    
-    print(f"Saved hero code and name data to {csv_file}")
-
-except Exception as e:
-    print(f"Error finding or saving hero elements: {e}")
-
-# Close the driver
-driver.quit()
-
-# Now Flip images
-import os
+import requests
 from PIL import Image
 
-# Define the dataset directory
-dataset_dir = 'dataset'
+HERO_JSON_URL = 'https://static-pubcomm.onstove.com/gameRecord/epic7/epic7_hero.json'
+OFFICIAL_PORTRAIT_URL = 'https://static-pubcomm.onstove.com/event/live/epic7/guide/images/hero/{code}_s.png'
+CODEX_UNITS_URL = 'https://e7codex.com/data/units.json'
+CODEX_ASSET_URL = 'https://e7codex.com/{path}'
 
-# Iterate through each hero_code folder in the dataset directory
-for hero_code in os.listdir(dataset_dir):
-    hero_dir = os.path.join(dataset_dir, hero_code)
-    if os.path.isdir(hero_dir):
-        # Define the path to the original and flipped images
-        original_image_path = os.path.join(hero_dir, 'c.png')
-        flipped_image_path = os.path.join(hero_dir, 'c_flipped.png')
+DATASET_DIR = 'dataset'
+CSV_FILE = 'data/hero_code_to_name.csv'
+
+session = requests.Session()
+session.headers['User-Agent'] = 'E7-RTA-Helper data updater'
+
+
+def get(url, retries=3):
+    for attempt in range(retries):
         try:
-            # Open the original image
-            with Image.open(original_image_path) as img:
-                # Horizontally flip the image
-                flipped_img = img.transpose(method=Image.FLIP_LEFT_RIGHT)
-                
-                # Save the flipped image
-                flipped_img.save(flipped_image_path)
-                
-            print(f"Saved flipped image for {hero_code} to {flipped_image_path}")
-        
-        except Exception as e:
-            print(f"Error processing image for {hero_code}: {e}")
+            response = session.get(url, timeout=30)
+            if response.status_code == 200:
+                return response
+            if response.status_code in (403, 404):
+                return None
+        except requests.RequestException as e:
+            print(f'Request failed ({attempt + 1}/{retries}) for {url}: {e}')
+        time.sleep(2)
+    return None
 
-# Flip Skins If Exists
-# Define the dataset directory
-dataset_dir = 'dataset'
 
-# Iterate through each hero_code folder in the dataset directory
-for hero_code in os.listdir(dataset_dir):
-    hero_dir = os.path.join(dataset_dir, hero_code)
-    if os.path.isdir(hero_dir):
-        # Define the path to the original and flipped images
-        original_image_path = os.path.join(hero_dir, 'c_1.png')
-        flipped_image_path = os.path.join(hero_dir, 'c_1_flipped.png')
-        try:
-            # Open the original image
-            with Image.open(original_image_path) as img:
-                # Horizontally flip the image
-                flipped_img = img.transpose(method=Image.FLIP_LEFT_RIGHT)
-                
-                # Save the flipped image
-                flipped_img.save(flipped_image_path)
-                
-            print(f"Saved flipped image for {hero_code} to {flipped_image_path}")
-        
-        except Exception as e:
-            print(f"Error processing image for {hero_code}: {e}")
+def load_existing_names():
+    if not os.path.exists(CSV_FILE):
+        return {}
+    with open(CSV_FILE, newline='', encoding='utf-8') as file:
+        return {row['code']: row['name'] for row in csv.DictReader(file)}
+
+
+def get_official_heroes():
+    heroes = get(HERO_JSON_URL).json()['en']
+    return {hero['code']: hero['name'] for hero in heroes}
+
+
+def get_codex_portraits():
+    """Map hero code -> {'base': path or None, 'skins': [paths sorted by variant]}."""
+    response = get(CODEX_UNITS_URL)
+    if response is None:
+        print('Could not load E7 Codex units, skins will not be updated')
+        return {}
+
+    portraits = {}
+    for unit in response.json():
+        if unit.get('kind') != 'unit':
+            continue
+        code = unit['base_id'].split('_')[0]
+        variant = unit.get('variant') or ''
+        entry = portraits.setdefault(code, {'base': None, 'skins': []})
+        # Only the plain face thumbnail; _sd (chibi emote) and _su/_l faces are not draft portraits
+        face_name = f'face_{code}_{variant}_s.png' if variant else f'face_{code}_s.png'
+        face = next((a for a in unit.get('artworks', []) if a.endswith('/' + face_name)), None)
+        if face is None:
+            continue
+        if variant:
+            entry['skins'].append((variant, face))
+        else:
+            entry['base'] = face
+
+    for entry in portraits.values():
+        entry['skins'] = [path for _, path in sorted(entry['skins'])]
+    return portraits
+
+
+def write_if_changed(path, content):
+    if os.path.exists(path):
+        with open(path, 'rb') as file:
+            if file.read() == content:
+                return False
+    with open(path, 'wb') as file:
+        file.write(content)
+    return True
+
+
+def save_template(hero_dir, suffix, content):
+    image_path = os.path.join(hero_dir, f'c{suffix}.png')
+    flipped_path = os.path.join(hero_dir, f'c{suffix}_flipped.png')
+    changed = write_if_changed(image_path, content)
+    if changed or not os.path.exists(flipped_path):
+        with Image.open(io.BytesIO(content)) as img:
+            img.transpose(Image.FLIP_LEFT_RIGHT).save(flipped_path)
+    return changed
+
+
+def main():
+    os.makedirs(DATASET_DIR, exist_ok=True)
+
+    existing = load_existing_names()
+    official = get_official_heroes()
+    codex = get_codex_portraits()
+
+    # Keep every hero we already track, then add new ones. The official list also
+    # contains alternate codes for the same hero (e.g. Mercedes c0001/c1005 vs c0002),
+    # which never show up in RTA records, so skip new codes whose name we already have.
+    heroes = dict(existing)
+    known_names = set(existing.values())
+    for code, name in official.items():
+        if code in heroes:
+            continue
+        if name in known_names:
+            print(f'Skipping duplicate hero code {code} ({name})')
+            continue
+        heroes[code] = name
+        known_names.add(name)
+        print(f'New hero: {code} - {name}')
+
+    updated, missing = [], []
+    for code in sorted(heroes):
+        hero_dir = os.path.join(DATASET_DIR, code)
+        os.makedirs(hero_dir, exist_ok=True)
+        entry = codex.get(code, {'base': None, 'skins': []})
+
+        response = get(OFFICIAL_PORTRAIT_URL.format(code=code))
+        if response is None and entry['base']:
+            response = get(CODEX_ASSET_URL.format(path=entry['base']))
+        if response is None:
+            if not os.path.exists(os.path.join(hero_dir, 'c.png')):
+                missing.append(code)
+            print(f'Failed to download portrait for {code}')
+        elif save_template(hero_dir, '', response.content):
+            updated.append(f'{code}/c.png')
+
+        for i, skin_path in enumerate(entry['skins'], start=1):
+            response = get(CODEX_ASSET_URL.format(path=skin_path))
+            if response is None:
+                print(f'Failed to download skin {skin_path}')
+                continue
+            if save_template(hero_dir, f'_{i}', response.content):
+                updated.append(f'{code}/c_{i}.png')
+
+    with open(CSV_FILE, 'w', newline='', encoding='utf-8') as file:
+        writer = csv.DictWriter(file, fieldnames=['code', 'name'], lineterminator='\n')
+        writer.writeheader()
+        writer.writerows({'code': code, 'name': heroes[code]} for code in sorted(heroes))
+
+    print(f'Saved {len(heroes)} heroes to {CSV_FILE}')
+    print(f'Updated {len(updated)} portrait files')
+    if missing:
+        print(f'Heroes without any portrait: {missing}')
+
+
+if __name__ == '__main__':
+    main()

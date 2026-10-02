@@ -56,6 +56,9 @@ jobs:
       - name: "Run script: Get hero official stats"
         run: |
           python workflow_scripts/get_hero_official_stats.py
+      - name: "Run script: Get matches"
+        run: |
+          python workflow_scripts/get_matches.py
       - name: "Run script: Calculate hero stats"
         run: |
           python workflow_scripts/get_hero_stats.py

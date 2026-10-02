@@ -24,6 +24,7 @@ import pickle
 import tensorflow as tf
 from attention import Attention
 import ast
+from ban_recommender import BanRecommender
 
 # For updating
 from packaging.version import Version
@@ -277,13 +278,20 @@ def search():
 
 # Function to recommend a hero
 # Load the CSV file
-data = pd.read_csv('data/epic7_match_history.csv')
+data = pd.read_csv('data/epic7_match_history.csv.gz')
 win_rates = {}
 
 @app.route('/init_recommender', methods=['GET'])
 def init_recommender():
-    global type_encoder, hero_encoder, max_sequence_length, model, hero_types, hero_type_dict, available_heroes, most_picked
+    global type_encoder, hero_encoder, max_sequence_length, model, hero_types, hero_type_dict, available_heroes, most_picked, ban_recommender
     try:
+        # Optional post-draft ban model; picks still work without it
+        try:
+            ban_recommender = BanRecommender.load_if_available()
+        except Exception as e:
+            logging.error(f"Could not load ban model: {str(e)}")
+            ban_recommender = None
+
         with open('data/rec_variables.pkl', 'rb') as f:
             type_encoder, hero_encoder, max_sequence_length = pickle.load(f)
         model = tf.keras.models.load_model('data/rec_model.h5', custom_objects={'Attention': Attention})
@@ -511,6 +519,34 @@ def recommend_characters():
     
     except Exception as e:
         print('Error on recommend: ', str(e))
+        logging.error(f"Error: {str(e)}")
+        return jsonify({"message": f"Error: {str(e)}"}), 500
+
+
+ban_recommender = None
+
+@app.route('/recommend_ban', methods=['GET'])
+def recommend_ban():
+    """Ban suggestions once both teams have 5 picks.
+
+    Params: user_picks, enemy_picks (comma separated), first_pick_team ('My Team' or 'Enemy Team'),
+    optional rule (e.g. rta_openingrule_category_4), user_banned and enemy_banned once known.
+    """
+    if ban_recommender is None:
+        return jsonify({"message": "Ban model is not available"}), 503
+    try:
+        user_picks = [h for h in request.args.get('user_picks', '').split(',') if h]
+        enemy_picks = [h for h in request.args.get('enemy_picks', '').split(',') if h]
+        user_first_pick = request.args.get('first_pick_team') == 'My Team'
+        result = ban_recommender.recommend(
+            user_picks[:5], enemy_picks[:5], user_first_pick,
+            rule=request.args.get('rule'),
+            user_banned=request.args.get('user_banned'),
+            enemy_banned=request.args.get('enemy_banned'))
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
         logging.error(f"Error: {str(e)}")
         return jsonify({"message": f"Error: {str(e)}"}), 500
 

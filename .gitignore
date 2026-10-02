@@ -15,3 +15,5 @@ server.log
 
 python/
 python_mac/
+# Raw crawl cache from workflow_scripts/get_matches.py (too large for git)
+match_histories/battles_*.jsonl

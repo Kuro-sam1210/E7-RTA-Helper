@@ -345,4 +345,5 @@ layout_mode = 2
 
 [connection signal="show_counters" from="." to="." method="on_show_counters"]
 [connection signal="show_recommendation" from="." to="." method="on_show_recommendation"]
+[connection signal="show_ban_suggestions" from="." to="." method="on_show_ban_suggestions"]
 [connection signal="show_synergies" from="." to="." method="on_show_synergies"]
