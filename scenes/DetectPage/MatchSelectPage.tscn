@@ -79,7 +79,7 @@ popup/item_2/id = 2
 
 [node name="RuleSelector" type="OptionButton" parent="CanvasLayer"]
 anchors_preset = -1
-anchor_left = 0.364
+anchor_left = 0.41
 anchor_top = 0.497
 anchor_right = 0.526
 anchor_bottom = 0.523
