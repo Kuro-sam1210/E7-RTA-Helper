@@ -35,8 +35,12 @@ app = Flask(__name__)
 # Configure logging
 logging.basicConfig(filename='server.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Where data updates come from (the maintained fork of SamTheCoder777/E7-RTA-Helper)
+UPDATE_REPO = 'Kuro-sam1210/E7-RTA-Helper'
+UPDATE_BRANCH = 'main'
+
 def fetch_json_from_github():
-    url = f"https://raw.githubusercontent.com/SamTheCoder777/E7-RTA-Helper/main/versions.json"
+    url = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/versions.json"
     response = requests.get(url)
     
     if response.status_code == 200:
@@ -46,20 +50,25 @@ def fetch_json_from_github():
         raise Exception(f"Failed to fetch file from GitHub. Status code: {response.status_code}")
     
 def update():
-    repo_url = 'https://github.com/SamTheCoder777/E7-RTA-Helper.git' 
+    repo_url = f'https://github.com/{UPDATE_REPO}.git'
     clone_dir = './repo'
     folders_to_move = ['CharacterUI', 'dataset', 'data']
     destination = './'
 
     if os.path.exists(clone_dir):
-        for root, dirs, files in os.walk(clone_dir):  
+        for root, dirs, files in os.walk(clone_dir):
             for dir in dirs:
                 os.chmod(path.join(root, dir), stat.S_IRWXU)
             for file in files:
                 os.chmod(path.join(root, file), stat.S_IRWXU)
         shutil.rmtree(clone_dir)
 
-    repo = git.Repo.clone_from(repo_url, clone_dir)
+    # Download only the latest version of the data folders, not the whole repository
+    # (which includes ~1 GB of bundled Python)
+    repo = git.Repo.clone_from(repo_url, clone_dir, depth=1, branch=UPDATE_BRANCH,
+                               multi_options=['--filter=blob:none', '--no-checkout'])
+    repo.git.sparse_checkout('set', '--no-cone', *[f'/{folder}/' for folder in folders_to_move])
+    repo.git.checkout(UPDATE_BRANCH)
 
     for folder in folders_to_move:
         # Full path of the folder to move
