@@ -17,3 +17,6 @@ python/
 python_mac/
 # Raw crawl cache from workflow_scripts/get_matches.py (too large for git)
 match_histories/battles_*.jsonl
+
+# Upload bundle for workflow_scripts/colab_train_rec_model.ipynb
+colab_bundle.zip
