@@ -7,7 +7,7 @@ from flask import Flask, jsonify, request
 import win32gui
 import numpy as np
 import pandas as pd
-from CaptureScreen import capture_screen
+from CaptureScreen import capture_screen, WindowNotFound
 
 app = Flask(__name__)
 
@@ -178,7 +178,10 @@ def find_prebans_any_size(band, height):
 
 def SIFT_feature_matching(target_gray, descriptors_target, keypoints_target, character, template_index):  
 		keypoints_template_normal, descriptors_template_normal, keypoints_template_flipped, descriptors_template_flipped = descriptor_cache[character][template_index]
-          
+		# Portraits without any SIFT features cannot be matched (knnMatch would raise)
+		if descriptors_template_normal is None or descriptors_template_flipped is None:
+			return
+
 		bf = cv2.BFMatcher()
 		matches = bf.knnMatch(descriptors_template_normal, descriptors_target, k=2)
 		matches_flipped = bf.knnMatch(descriptors_template_flipped, descriptors_target, k=2)
@@ -234,9 +237,11 @@ def _test_SIFT_feature_matching():
         crop_top_percent, crop_bottom_percent, crop_right_percent, crop_left_percent, crop_middle = map(float, crops)
 
 
-    'rta_2.jpg'
-	# Capture window
-    target_image = capture_screen(window_title)  # Reduce resolution
+    # Capture window; a missing window (game closed or restarting) is a normal state, not a crash
+    try:
+        target_image = capture_screen(window_title)
+    except WindowNotFound as e:
+        return jsonify({"message": str(e)}), 404
 
     if target_image is None:
         raise ValueError("Failed to load target image")
@@ -275,6 +280,13 @@ def detect_draft(target_image, crop_middle=0, skip_prebans=False):
 
     sift = cv2.SIFT_create()
     keypoints_target, descriptors_target = sift.detectAndCompute(target_gray, None)
+
+    empty = {"user_team": [], "enemy_team": [], "user_team_y": [], "enemy_team_y": [],
+             "user_banned_y": None, "enemy_banned_y": None,
+             "user_prebans": user_prebans, "enemy_prebans": enemy_prebans}
+    # A blank frame (e.g. a black loading screen) has nothing to match against
+    if descriptors_target is None or len(keypoints_target) < 2:
+        return empty
 
     # Clear previous results
     characters_in_match.clear()

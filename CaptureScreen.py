@@ -57,9 +57,15 @@ def gdi_resource_management(hwnd):
         mfc_dc.DeleteDC()
         win32gui.ReleaseDC(hwnd, hwnd_dc)
 
+class WindowNotFound(Exception):
+    pass
+
+
 def capture_screen(window_name: str):
     windll.user32.SetProcessDPIAware()
-    hwnd = win32gui.FindWindow(None, window_name)
+    hwnd = win32gui.FindWindow(None, window_name) if window_name else 0
+    if not hwnd:
+        raise WindowNotFound(f"No window titled '{window_name}' (is the game running?)")
 
     left, top, right, bottom = win32gui.GetClientRect(hwnd)
     w = right - left

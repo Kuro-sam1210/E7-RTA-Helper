@@ -47,6 +47,8 @@ var draft_had_picks = false
 # Frame noise: a draft only ends after several empty frames in a row, and teams are held
 # through frames that lose heroes (transition animations, the splash art on the enemy's turn)
 const EMPTY_FRAMES_TO_END_DRAFT = 3
+const DETECTION_RETRY_DELAY_MS = 2000
+var detection_retry_at = 0
 var empty_frames = 0
 var held_user_team = []
 var held_user_y = []
@@ -152,13 +154,15 @@ func _process(_delta):
 	# Update request_done
 	request_done = GlobalVars.request_done
 
-	# Request char detection
-	if request_done:
+	# Request char detection (after a failed capture, e.g. the game is closed, wait a moment
+	# instead of retrying every frame)
+	if request_done and Time.get_ticks_msec() >= detection_retry_at:
 		# Reset DetectOutput
 		DetectOutput = {}
 		var url = "http://127.0.0.1:"+str(GlobalVars.port)+"/detect_enemy?title="+title.uri_encode()+"&crops="+CropTopValue+","+CropBotValue+","+CropRightValue+","+CropLeftValue+","+CropCenterValue
-		# Preban detection is the slow part; skip it once all four are known for this draft
-		if prebans.size() >= 4:
+		# Preban detection is the slow part; skip it once all four are known, or once picks
+		# are under way (by then prebans are as settled as they will get)
+		if prebans.size() >= 4 or held_user_team.size() + held_enemy_team.size() >= 3:
 			url += "&skip_prebans=1"
 		if http_request.get_http_client_status() == 0:
 			http_request.request(url)
@@ -242,8 +246,8 @@ func apply_draft_memory(output: Dictionary) -> bool:
 	var no_picks = user_team.is_empty() and enemy_team.is_empty()
 	empty_frames = empty_frames + 1 if no_picks else 0
 
-	# Left the draft screen: forget this draft. Once all prebans are known the server stops
-	# looking for them, so then only picks disappearing (after there were some) ends the draft.
+	# Left the draft screen: forget this draft. Once the server stops looking for prebans (all
+	# four known, or picks under way), only picks disappearing (after there were some) ends it.
 	# Either way it takes several empty frames in a row, so one bad frame cannot end it.
 	var draft_over = no_picks and seen_prebans.is_empty()
 	if prebans.size() >= 4:
@@ -374,6 +378,7 @@ func _on_detection_completed(result, response_code, headers, body):
 
 	else:
 		request_done = true # Try again
+		detection_retry_at = Time.get_ticks_msec() + DETECTION_RETRY_DELAY_MS
 		can_ask_rec = true
 		old_user_team = []
 		old_enemy_team = []
