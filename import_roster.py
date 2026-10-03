@@ -5,8 +5,11 @@ gear_<date>.txt written by a gear scanner. A hero counts as built when it is 6 s
 gear slots filled. search_server.py reads my_roster.json if it exists and, on your turns, suggests
 only built heroes. The roster is personal: my_roster.json is gitignored.
 
+Heroes built after the export was taken can be added by code; they are stored as "manual_built" in
+my_roster.json (which can also be edited by hand) and kept when a newer export is imported.
+
 Usage:
-  python import_roster.py path/to/gear_export.txt
+  python import_roster.py path/to/gear_export.txt [hero codes built since, e.g. c5147]
 """
 import collections
 import json
@@ -39,11 +42,23 @@ def build_roster(export):
             'gear_speed': gear_speed}
 
 
+def load_manual_built():
+    """Hero codes the player added by hand ("manual_built"), kept across re-imports."""
+    try:
+        with open(ROSTER_FILE, encoding='utf-8') as file:
+            return json.load(file).get('manual_built', [])
+    except (OSError, ValueError):
+        return []
+
+
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         sys.exit(__doc__)
     with open(sys.argv[1], encoding='utf-8') as file:
         roster = build_roster(json.load(file))
+    # Heroes built since the export was taken: kept from the previous roster, plus any given here
+    roster['manual_built'] = sorted(set(load_manual_built()) | set(sys.argv[2:]))
     with open(ROSTER_FILE, 'w', encoding='utf-8') as file:
         json.dump(roster, file, indent=1)
-    print(f'{len(roster["owned"])} heroes owned, {len(roster["built"])} built -> {ROSTER_FILE}')
+    print(f'{len(roster["owned"])} heroes owned, {len(roster["built"])} built '
+          f'(+{len(roster["manual_built"])} added by hand) -> {ROSTER_FILE}')

@@ -177,7 +177,9 @@ def init_recommender():
         if os.path.exists('my_roster.json'):
             try:
                 with open('my_roster.json', encoding='utf-8') as f:
-                    roster_built = set(json.load(f).get('built', []))
+                    roster = json.load(f)
+                # "manual_built": heroes built since the gear export was taken
+                roster_built = set(roster.get('built', [])) | set(roster.get('manual_built', []))
             except Exception as e:
                 logging.error(f"Could not read my_roster.json: {str(e)}")
 
