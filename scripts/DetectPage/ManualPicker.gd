@@ -65,6 +65,8 @@ func _ready():
 	hero_list.same_column_width = true
 	hero_list.fixed_icon_size = ICON_SIZE
 	hero_list.item_clicked.connect(_on_item_clicked)
+	# The list has no width until it is first laid out
+	hero_list.resized.connect(fit_columns)
 	box.add_child(hero_list)
 
 func open():
@@ -102,8 +104,7 @@ func set_used(codes: Array):
 
 func refresh():
 	hero_list.clear()
-	# Columns share the list's width
-	hero_list.fixed_column_width = int(max(hero_list.size.x - 24, 300) / COLUMNS) - ICON_SIZE.x
+	fit_columns()
 	var query = search.text.strip_edges().to_lower()
 	for hero in heroes:
 		if query != "" and not hero[0].to_lower().contains(query):
@@ -113,6 +114,12 @@ func refresh():
 		# Heroes already in the draft stay clickable only to be marked as banned
 		if used.has(hero[1]):
 			hero_list.set_item_custom_fg_color(item, Color(1, 1, 1, 0.35))
+
+# Columns share the list's width
+func fit_columns():
+	var width = int(max(hero_list.size.x - 24, 300) / COLUMNS) - ICON_SIZE.x
+	if hero_list.fixed_column_width != width:
+		hero_list.fixed_column_width = width
 
 func choose(item: int):
 	hero_chosen.emit(str(hero_list.get_item_metadata(item)), target_selector.selected)
