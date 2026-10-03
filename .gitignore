@@ -27,3 +27,6 @@ cache/
 # Written by the servers at startup
 server_port.txt
 search_server_port.txt
+
+# Personal roster written by import_roster.py
+my_roster.json

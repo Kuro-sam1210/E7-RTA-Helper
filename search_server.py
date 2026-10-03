@@ -170,8 +170,17 @@ win_rates = {}
 
 @app.route('/init_recommender', methods=['GET'])
 def init_recommender():
-    global type_encoder, hero_encoder, max_sequence_length, model, hero_types, hero_type_dict, available_heroes, most_picked, win_model, rule_encoder
+    global type_encoder, hero_encoder, max_sequence_length, model, hero_types, hero_type_dict, available_heroes, most_picked, win_model, rule_encoder, roster_built
     try:
+        # Optional personal roster (see import_roster.py): the heroes the player has built
+        roster_built = set()
+        if os.path.exists('my_roster.json'):
+            try:
+                with open('my_roster.json', encoding='utf-8') as f:
+                    roster_built = set(json.load(f).get('built', []))
+            except Exception as e:
+                logging.error(f"Could not read my_roster.json: {str(e)}")
+
         # Optional win model (win bar and ban suggestions); picks still work without it
         try:
             win_model = WinModel.load_if_available()
@@ -261,7 +270,10 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
 
     # When the first-pick team has not picked yet, return the most common openers
     if first_pick_team == 'My Team' and len(user_team_picks) == 0:
-        most_picks = [h for h in most_picked if h not in prebans][:10]
+        most_picks = [h for h in most_picked if h not in prebans]
+        if roster_built:
+            most_picks = [h for h in most_picks if h in roster_built] or most_picks
+        most_picks = most_picks[:10]
         return jsonify({
         'top_10_heroes': most_picks,
         'pick_win_rates': [],
@@ -380,7 +392,13 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
     combined_hero_indices.update(hero_encoder.transform([h for h in prebans if h in available_heroes]))
     combined_hero_indices.add(int(hero_encoder.transform(['unknown'])[0]))
     top_10_indices = np.argsort(prediction[0])[::-1]
-    filtered_top_10_indices = [idx for idx in top_10_indices if idx not in combined_hero_indices][:10]
+    candidate_indices = [idx for idx in top_10_indices if idx not in combined_hero_indices]
+    # On our own turn, only suggest heroes the player has built (when a roster was imported)
+    if roster_built and picker_is_first == user_is_first:
+        built_candidates = [idx for idx in candidate_indices if hero_encoder.classes_[idx] in roster_built]
+        if built_candidates:
+            candidate_indices = built_candidates
+    filtered_top_10_indices = candidate_indices[:10]
 
     top_10_heroes = hero_encoder.inverse_transform(filtered_top_10_indices)
     pick_win_rates = []
@@ -441,6 +459,7 @@ def recommend_characters():
 
 win_model = None
 rule_encoder = None
+roster_built = set()
 
 @app.route('/recommend_ban', methods=['GET'])
 def recommend_ban():
