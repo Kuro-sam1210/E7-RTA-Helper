@@ -188,10 +188,12 @@ def init_recommender():
         hero_types = pd.read_csv('data/hero_types.csv')
         hero_types['type_list'] = hero_types['type'].apply(ast.literal_eval)
 
-        # In case user and enemy are both empty, recommend random hero from top 50
-        # most picked heroes
+        # Before the first pick there is nothing for the model to read, so suggest the most
+        # common openers in order (first picks are far more concentrated than picks overall;
+        # older stats files without the column fall back to the overall pick rate)
         most_picked = pd.read_csv('data/epic7_hero_stats.csv')
-        most_picked = most_picked.sort_values(by='Pick Rate', ascending=False)
+        opener_column = 'First Pick Rate' if 'First Pick Rate' in most_picked.columns else 'Pick Rate'
+        most_picked = most_picked.sort_values(by=opener_column, ascending=False)
         most_picked = most_picked['Hero'].values[:50]
 
         # Transform type_list and handle multiple columns
@@ -257,9 +259,8 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
             print(f"Hero {hero} not found in available heroes. Removing from enemy picks.")
             enemy_team_picks[i] = 'unknown'
 
-    # When both are empty, then return a high pickrate hero
+    # When the first-pick team has not picked yet, return the most common openers
     if first_pick_team == 'My Team' and len(user_team_picks) == 0:
-        np.random.shuffle(most_picked)
         most_picks = [h for h in most_picked if h not in prebans][:10]
         return jsonify({
         'top_10_heroes': most_picks,
@@ -267,7 +268,6 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
         }), 200
 
     elif first_pick_team == 'Enemy Team' and len(enemy_team_picks) == 0:
-        np.random.shuffle(most_picked)
         most_picks = [h for h in most_picked if h not in prebans][:10]
         return jsonify({
         'top_10_heroes': most_picks,

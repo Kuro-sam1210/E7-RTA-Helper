@@ -102,6 +102,11 @@ def calculate_winrates_counters_and_counters_against(df):
 # Calculate all information
 df_all_info = calculate_winrates_counters_and_counters_against(df)
 
+# How often each hero is the very first pick of a draft: openers are far more concentrated
+# than picks overall, so the app suggests first picks from this instead of the pick rate
+first_pick_rate = df[df['Pick Order'] == 1]['Hero'].value_counts() / df['Match Number'].nunique()
+df_all_info['First Pick Rate'] = df_all_info['Hero'].map(first_pick_rate).fillna(0)
+
 # Save to CSV
 df_all_info.to_csv('data/epic7_hero_stats.csv', index=False)
 
