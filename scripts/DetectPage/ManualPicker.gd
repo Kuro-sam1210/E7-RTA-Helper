@@ -5,6 +5,7 @@ extends PanelContainer
 
 signal hero_chosen(code: String, target: int)
 signal undo_pressed
+signal next_pressed
 signal clear_pressed
 
 enum Target { DRAFT_ORDER, MY_TEAM, ENEMY_TEAM, PREBAN, BAN }
@@ -44,6 +45,12 @@ func _ready():
 		target_selector.add_item(label)
 	target_selector.tooltip_text = "Where the next hero goes. Ban marks a drafted hero as banned."
 	row.add_child(target_selector)
+
+	var next = Button.new()
+	next.text = "Next"
+	next.tooltip_text = "Move on: from prebans to the draft, from the draft to bans"
+	next.pressed.connect(func(): next_pressed.emit())
+	row.add_child(next)
 
 	var undo = Button.new()
 	undo.text = "Undo"
@@ -94,6 +101,9 @@ func load_heroes():
 
 func hero_name(code) -> String:
 	return names.get(str(code), str(code))
+
+func set_target(target: int):
+	target_selector.select(target)
 
 func set_status(text: String):
 	status.text = text

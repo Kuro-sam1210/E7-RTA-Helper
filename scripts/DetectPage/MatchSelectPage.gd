@@ -134,6 +134,9 @@ func _ready():
 	manual_picker.anchor_bottom = 0.437
 	manual_picker.hero_chosen.connect(self._on_manual_hero_chosen)
 	manual_picker.undo_pressed.connect(self._on_manual_undo)
+	manual_picker.next_pressed.connect(self._on_manual_next)
+	# In manual input, clicking a suggestion enters it
+	$CanvasLayer/UserPickData.hero_clicked.connect(self._on_suggestion_clicked)
 	manual_picker.clear_pressed.connect(self._on_manual_clear)
 	$CanvasLayer.add_child(manual_picker)
 	$CanvasLayer.move_child(manual_picker, $CanvasLayer/PauseScreen.get_index())
@@ -490,16 +493,35 @@ func force_new_recommendation():
 func _on_manual_toggled(enabled: bool):
 	manual_mode = enabled
 	manual_picker.visible = enabled
+	$CanvasLayer/UserPickData.set_pick_on_click(enabled)
 	if enabled:
 		# Carry on from what detection has seen so far
 		manual_user_team = held_user_team.duplicate()
 		manual_enemy_team = held_enemy_team.duplicate()
 		manual_history = []
 		manual_picker.open()
+		# A fresh draft starts with the prebans
+		var fresh = manual_user_team.is_empty() and manual_enemy_team.is_empty() and prebans.is_empty()
+		manual_picker.set_target(ManualPicker.Target.PREBAN if fresh else manual_stage_target())
 		refresh_manual_draft(false)
 	else:
 		reset_draft_memory()
 		force_new_recommendation()
+
+func manual_draft_complete() -> bool:
+	return manual_user_team.size() + manual_enemy_team.size() >= FIRST_PICK_TURNS.size()
+
+# Where heroes go once the prebans are done: picks until the draft is complete, then bans
+func manual_stage_target() -> int:
+	return ManualPicker.Target.BAN if manual_draft_complete() else ManualPicker.Target.DRAFT_ORDER
+
+func _on_manual_next():
+	manual_picker.set_target(manual_stage_target())
+	manual_picker.search.grab_focus()
+
+func _on_suggestion_clicked(code: String):
+	if manual_mode:
+		_on_manual_hero_chosen(code, manual_picker.target_selector.selected)
 
 # In draft order, does the next pick go to the user's team?
 func next_manual_pick_is_users() -> bool:
@@ -542,6 +564,11 @@ func _on_manual_hero_chosen(code: String, target: int):
 			return
 		team.append(code)
 		manual_history.append([ManualPicker.Target.MY_TEAM if to_user else ManualPicker.Target.ENEMY_TEAM, code, ""])
+	# Move on by itself once a stage is full: four prebans, then ten picks
+	if target == ManualPicker.Target.PREBAN and prebans.size() >= 4:
+		manual_picker.set_target(manual_stage_target())
+	elif target != ManualPicker.Target.PREBAN and target != ManualPicker.Target.BAN and manual_draft_complete():
+		manual_picker.set_target(ManualPicker.Target.BAN)
 	refresh_manual_draft(bans_changed)
 
 func _on_manual_undo():
@@ -561,6 +588,8 @@ func _on_manual_undo():
 			manual_user_team.erase(hero)
 		ManualPicker.Target.ENEMY_TEAM:
 			manual_enemy_team.erase(hero)
+	if manual_picker.target_selector.selected == ManualPicker.Target.BAN and not manual_draft_complete():
+		manual_picker.set_target(ManualPicker.Target.DRAFT_ORDER)
 	refresh_manual_draft(true)
 
 func _on_manual_clear():
@@ -568,6 +597,7 @@ func _on_manual_clear():
 	manual_user_team = []
 	manual_enemy_team = []
 	manual_history = []
+	manual_picker.set_target(ManualPicker.Target.PREBAN)
 	refresh_manual_draft(false)
 
 # Redraw the hand-entered draft and ask for new suggestions
@@ -590,7 +620,7 @@ func refresh_manual_draft(bans_changed: bool):
 	if manual_user_team.size() + manual_enemy_team.size() < 10:
 		notes.append("Next in draft order: " + ("My Team" if next_manual_pick_is_users() else "Enemy Team"))
 	else:
-		notes.append("Draft complete. Set the target to Ban to mark banned heroes")
+		notes.append("Draft complete. Pick the banned hero of each team")
 	if user_banned != "":
 		notes.append("My " + manual_picker.hero_name(user_banned) + " banned")
 	if enemy_banned != "":

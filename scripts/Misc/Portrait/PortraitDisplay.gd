@@ -5,6 +5,10 @@ var regex
 var char_desc = preload('res://scenes/CharacterDesc/CharacterDesc.tscn').instantiate()
 var current_char = "Unknown"
 var current_name = "Unknown"
+
+# Manual draft input: a click picks the hero instead of opening its description
+signal hero_pressed(code: String)
+var pick_on_click = false
 # Called when the node enters the scene tree for the first time.
 func _ready():
 	regex = RegEx.new()
@@ -28,7 +32,9 @@ func _process(delta):
 
 
 func _on_button_pressed():
-	if current_name != "Unknown":
+	if current_name != "Unknown" and pick_on_click:
+		hero_pressed.emit(current_char)
+	elif current_name != "Unknown":
 		char_desc.set_content(current_char)		
 		get_tree().root.add_child(char_desc)
 		char_desc = preload('res://scenes/CharacterDesc/CharacterDesc.tscn').instantiate()

@@ -41,6 +41,12 @@ signal show_recommendation(recommendation: Array)
 signal show_ban_suggestions(ban_suggestions: Array, likely_enemy_bans: Array)
 signal show_counters(character: String)
 signal show_synergies(character: String)
+# A suggested hero was clicked while suggestions are clickable (manual draft input)
+signal hero_clicked(code: String)
+
+func set_pick_on_click(enabled: bool):
+	for portrait in portraits:
+		portrait.pick_on_click = enabled
 
 func set_hero_portrait(portrait, hero: String):
 	var image = Image.load_from_file('dataset/'+hero+'/c.png')
@@ -132,7 +138,8 @@ func on_show_synergies(character: String):
 	
 # Called when the node enters the scene tree for the first time.
 func _ready():
-	pass # Replace with function body.
+	for portrait in portraits:
+		portrait.hero_pressed.connect(func(code): hero_clicked.emit(code))
 
 
 # Called every frame. 'delta' is the elapsed time since the previous frame.
