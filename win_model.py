@@ -1,9 +1,10 @@
 """Win rates and ban suggestions from data/win_model.h5 (see workflow_scripts/get_win_model.py).
 
   - win_rate(): our chance to win from the heroes picked so far (the win bar while drafting)
-  - recommend_bans(): after the draft each side bans one of the other's five heroes.
-    For every pair (our hero they ban, their hero we ban) the model predicts our win
-    rate with the remaining four against four. From that 5x5 table:
+  - recommend_bans(): after the draft each side bans one of the other's heroes (the third
+    pick is ban-protected, so four are bannable). For every pair (our hero they ban, their
+    hero we ban) the model predicts our win rate with the remaining four against four.
+    From that 4x4 table:
       - our best ban is the enemy hero with the highest worst-case win rate, i.e.
         assuming they answer with their best ban (average shown alongside)
       - their most likely target is our hero whose loss hurts us most
@@ -17,6 +18,7 @@ import tensorflow as tf
 MODEL_PATH = 'data/win_model.h5'
 HEROES_PATH = 'data/win_model_heroes.json'
 EMPTY, UNKNOWN = 0, 1
+BAN_PROTECTED_SLOT = 2  # index of each team's third pick ("Ban Protection" in the draft screen)
 
 
 class WinModel:
@@ -58,27 +60,30 @@ class WinModel:
         if len(user_team) != 5 or len(enemy_team) != 5:
             raise ValueError('Ban suggestions need both full teams of 5 heroes')
 
-        pairs = [(ours, theirs) for ours in user_team for theirs in enemy_team]
+        # Each team's third pick is ban-protected by the game, so only the other four can be banned
+        ours_bannable = [h for i, h in enumerate(user_team) if i != BAN_PROTECTED_SLOT]
+        theirs_bannable = [h for i, h in enumerate(enemy_team) if i != BAN_PROTECTED_SLOT]
+        pairs = [(ours, theirs) for ours in ours_bannable for theirs in theirs_bannable]
         rates = self._predict(
             [[h for h in user_team if h != ours] for ours, _ in pairs],
             [[h for h in enemy_team if h != theirs] for _, theirs in pairs],
-            user_first_pick, rule, post_ban=1).reshape(5, 5)  # rows: our banned hero, cols: their banned hero
+            user_first_pick, rule, post_ban=1).reshape(4, 4)  # rows: our banned hero, cols: their banned hero
 
         our_bans = sorted(({'hero': hero,
                             'worst_case_win_rate': float(rates[:, j].min()),
                             'win_rate': float(rates[:, j].mean())}
-                           for j, hero in enumerate(enemy_team)),
+                           for j, hero in enumerate(theirs_bannable)),
                           key=lambda x: (-x['worst_case_win_rate'], -x['win_rate']))
         their_bans = sorted(({'hero': hero, 'win_rate': float(rates[i, :].max())}
-                             for i, hero in enumerate(user_team)), key=lambda x: x['win_rate'])
+                             for i, hero in enumerate(ours_bannable)), key=lambda x: x['win_rate'])
 
         # Expected result if both sides make their best ban
-        best_ban = enemy_team.index(our_bans[0]['hero'])
+        best_ban = theirs_bannable.index(our_bans[0]['hero'])
         result = {
             'ban_suggestions': our_bans,       # best enemy hero to ban first
             'likely_enemy_bans': their_bans,   # our hero they most want to ban first
             'win_prediction': float(rates[:, best_ban].min()),
         }
-        if user_banned in user_team and enemy_banned in enemy_team:
-            result['win_prediction'] = float(rates[user_team.index(user_banned), enemy_team.index(enemy_banned)])
+        if user_banned in ours_bannable and enemy_banned in theirs_bannable:
+            result['win_prediction'] = float(rates[ours_bannable.index(user_banned), theirs_bannable.index(enemy_banned)])
         return result
