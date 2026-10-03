@@ -64,7 +64,7 @@ const ManualPicker = preload("res://scripts/DetectPage/ManualPicker.gd")
 const FIRST_PICK_TURNS = [true, false, false, true, true, false, false, true, true, false]
 var manual_mode = false
 var manual_picker
-# One line under the panels: where to stand each hero once the draft is complete
+# One line under the title: where to stand each hero once the draft is complete
 var formation_label: Label
 var manual_user_team = []
 var manual_enemy_team = []
@@ -140,9 +140,9 @@ func _ready():
 
 	formation_label = Label.new()
 	formation_label.anchor_left = 0.04
-	formation_label.anchor_top = 0.968
+	formation_label.anchor_top = 0.056
 	formation_label.anchor_right = 0.968
-	formation_label.anchor_bottom = 0.998
+	formation_label.anchor_bottom = 0.083
 	formation_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	formation_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	formation_label.clip_text = true
