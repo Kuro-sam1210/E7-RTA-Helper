@@ -58,6 +58,18 @@ var held_enemy_y = []
 # Check if paused
 var paused = false
 
+# Manual input: the draft is entered by hand in the picker instead of read from the screen
+const ManualPicker = preload("res://scripts/DetectPage/ManualPicker.gd")
+# Which of the ten picks belong to the first-pick team
+const FIRST_PICK_TURNS = [true, false, false, true, true, false, false, true, true, false]
+var manual_mode = false
+var manual_picker
+var manual_user_team = []
+var manual_enemy_team = []
+var manual_history = [] # [target, hero, previously banned hero] per entry, for undo
+# Ask for a recommendation even though the teams did not change (first pick, rule, bans)
+var rec_forced = false
+
 # Crop values
 var CropTopValue = 1
 var CropBotValue = 1
@@ -101,6 +113,28 @@ func _ready():
 	ban_http_request = HTTPRequest.new()
 	add_child(ban_http_request)
 	ban_http_request.request_completed.connect(self._on_ban_suggestions_completed)
+
+	# Manual input: a toggle in the top right corner, and the picker over the user stats
+	var manual_toggle = CheckButton.new()
+	manual_toggle.text = "Manual input"
+	manual_toggle.anchor_left = 0.78
+	manual_toggle.anchor_top = 0.015
+	manual_toggle.anchor_right = 0.968
+	manual_toggle.anchor_bottom = 0.045
+	manual_toggle.toggled.connect(self._on_manual_toggled)
+	$CanvasLayer.add_child(manual_toggle)
+
+	manual_picker = ManualPicker.new()
+	manual_picker.visible = false
+	manual_picker.anchor_left = 0.04
+	manual_picker.anchor_top = 0.085
+	manual_picker.anchor_right = 0.968
+	manual_picker.anchor_bottom = 0.437
+	manual_picker.hero_chosen.connect(self._on_manual_hero_chosen)
+	manual_picker.undo_pressed.connect(self._on_manual_undo)
+	manual_picker.clear_pressed.connect(self._on_manual_clear)
+	$CanvasLayer.add_child(manual_picker)
+	$CanvasLayer.move_child(manual_picker, $CanvasLayer/PauseScreen.get_index())
 
 	#print(await GlobalVars.get_user_data('khhm'))
 	
@@ -153,6 +187,9 @@ func _input(event):
 func _process(_delta):
 	# Update request_done
 	request_done = GlobalVars.request_done
+
+	if manual_mode:
+		return
 
 	# Request char detection (after a failed capture, e.g. the game is closed, wait a moment
 	# instead of retrying every frame)
@@ -226,6 +263,20 @@ func hero_at_height(team: Array, heights: Array, y) -> String:
 			best = str(team[i])
 	return best
 
+func reset_draft_memory():
+	draft_had_picks = false
+	held_user_team = []
+	held_user_y = []
+	held_enemy_team = []
+	held_enemy_y = []
+	prebans = []
+	full_user_team = []
+	full_user_y = []
+	full_enemy_team = []
+	full_enemy_y = []
+	user_banned = ""
+	enemy_banned = ""
+
 # [team, heights] to use for this frame: the held team when the frame only shows a subset of it
 func hold_team(team: Array, heights: Array, held: Array, held_heights: Array) -> Array:
 	if team.size() < held.size():
@@ -256,18 +307,7 @@ func apply_draft_memory(output: Dictionary) -> bool:
 	if not no_picks:
 		draft_had_picks = true
 	if draft_over:
-		draft_had_picks = false
-		held_user_team = []
-		held_user_y = []
-		held_enemy_team = []
-		held_enemy_y = []
-		prebans = []
-		full_user_team = []
-		full_user_y = []
-		full_enemy_team = []
-		full_enemy_y = []
-		user_banned = ""
-		enemy_banned = ""
+		reset_draft_memory()
 		return false
 
 	if seen_prebans.size() > prebans.size():
@@ -309,72 +349,54 @@ func apply_draft_memory(output: Dictionary) -> bool:
 	enemy_banned = new_enemy_banned
 	return changed
 
-var index = 0
+# Draw both teams and their stats, and ask for recommendations when something changed
+func show_draft(user_picks: Array, enemy_picks: Array, bans_changed: bool):
+	var user_team = ",".join(user_picks)
+	var enemy_team = ",".join(enemy_picks)
+
+	UserPortraits.set_portraits(user_picks)
+	# Show synergies to the last user pick
+	$CanvasLayer/UserPickData.emit_signal('show_synergies', str(user_picks.back()) if not user_picks.is_empty() else '')
+
+	EnemyPortraits.set_portraits(enemy_picks)
+	# Show counters to the last enemy pick, and its stats
+	var last_enemy_pick = str(enemy_picks.back()) if not enemy_picks.is_empty() else ''
+	$CanvasLayer/UserPickData.emit_signal('show_counters', last_enemy_pick)
+	EnemyPickStats.emit_signal('char_picked', last_enemy_pick)
+
+	# Request recommendations
+	if can_ask_rec and (rec_forced or user_picks != old_user_team or enemy_picks != old_enemy_team):
+		old_user_team = user_picks
+		old_enemy_team = enemy_picks
+		can_ask_rec = false
+		rec_forced = false
+		var first_pick_team = "My Team" if is_user_first_pick else "Enemy Team"
+		last_user_team = user_team
+		last_enemy_team = enemy_team
+		var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&prebans="+",".join(prebans)
+		print('url: '+url)
+		misc_http_request.request(url)
+
+	elif bans_changed and full_user_team.size() == 5 and full_enemy_team.size() == 5:
+		# Bans just appeared on screen: refresh the ban view with the exact post-ban win rate
+		last_user_team = ",".join(full_user_team)
+		last_enemy_team = ",".join(full_enemy_team)
+		request_ban_suggestions()
+
 func _on_detection_completed(result, response_code, headers, body):
 	print("Char Detection Completed!")
+	if manual_mode:
+		# A capture that was still running when manual input was switched on
+		request_done = true
+		return
 	if response_code == 200:
 		request_done = true # Can do request call again
 		var json = JSON.new()
 		json.parse(body.get_string_from_utf8())
 		DetectOutput = json.get_data()
 		var bans_changed = apply_draft_memory(DetectOutput)
-
-		var user_team = ""
-		index+=1
-		if len(DetectOutput['user_team'])>0:
-			for i in range(DetectOutput['user_team'].size()):
-				user_team += str(DetectOutput['user_team'][i])
-				if i < DetectOutput['user_team'].size() -1:
-					user_team += ","
-				
-				
-			UserPortraits.set_portraits(DetectOutput['user_team'])
-			# Now Show Synergies to last user pick
-			$CanvasLayer/UserPickData.emit_signal('show_synergies', DetectOutput['user_team'].back())
-		else:
-			print('eh?')
-			UserPortraits.set_portraits([])
-			$CanvasLayer/UserPickData.emit_signal('show_synergies', '')
-		
-		var enemy_team = ""
-		# Now Set the Portraits
-		if len(DetectOutput['enemy_team'])>0:
-			for i in range(DetectOutput['enemy_team'].size()):
-				enemy_team += str(DetectOutput['enemy_team'][i])
-				if i < DetectOutput['enemy_team'].size() -1:
-					enemy_team += ","
-			EnemyPortraits.set_portraits(DetectOutput['enemy_team'])
-			# Now Show Counters to last enemy pick
-			$CanvasLayer/UserPickData.emit_signal('show_counters', DetectOutput['enemy_team'].back())
-			
-			# Show char picked
-			EnemyPickStats.emit_signal('char_picked',DetectOutput['enemy_team'].back())
-		
-		else:
-			EnemyPortraits.set_portraits([])			
-			$CanvasLayer/UserPickData.emit_signal('show_counters', '')
-			EnemyPickStats.emit_signal('char_picked','')			
-		
-		var response = json.get_data()		
+		show_draft(DetectOutput['user_team'], DetectOutput['enemy_team'], bans_changed)
 		print("Detection Success")
-		
-		# Request recommendations
-		if can_ask_rec and (DetectOutput['user_team'] != old_user_team or DetectOutput['enemy_team'] != old_enemy_team):
-				old_user_team = DetectOutput['user_team']
-				old_enemy_team = DetectOutput['enemy_team']
-				can_ask_rec = false
-				var first_pick_team = "My Team"if is_user_first_pick else "Enemy Team"
-				last_user_team = user_team
-				last_enemy_team = enemy_team
-				var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&prebans="+",".join(prebans)
-				print('url: '+url)
-				misc_http_request.request(url)
-
-		elif bans_changed and full_user_team.size() == 5 and full_enemy_team.size() == 5:
-			# Bans just appeared on screen: refresh the ban view with the exact post-ban win rate
-			last_user_team = ",".join(full_user_team)
-			last_enemy_team = ",".join(full_enemy_team)
-			request_ban_suggestions()
 
 	else:
 		request_done = true # Try again
@@ -409,12 +431,16 @@ func _on_back_button_pressed():
 func _on_first_pick_selector_selected(index):
 	is_user_first_pick = index == 1
 	force_new_recommendation()
+	if manual_mode:
+		refresh_manual_draft(false)
 
 # Warfare rule selector: item ids are the rule category numbers
 func _on_rule_selector_selected(index):
 	var rule_id = $CanvasLayer/RuleSelector.get_item_id(index)
 	rule = "rta_openingrule_category_%d" % rule_id if rule_id > 0 else ""
 	force_new_recommendation()
+	if manual_mode:
+		refresh_manual_draft(false)
 
 func force_new_recommendation():
 	# Cancel rec requests
@@ -424,6 +450,116 @@ func force_new_recommendation():
 		ban_http_request.cancel_request()
 	# Force resubmit rec
 	can_ask_rec = true
+	rec_forced = true
 	old_user_team = []
 	old_enemy_team = []
-	
+
+func _on_manual_toggled(enabled: bool):
+	manual_mode = enabled
+	manual_picker.visible = enabled
+	if enabled:
+		# Carry on from what detection has seen so far
+		manual_user_team = held_user_team.duplicate()
+		manual_enemy_team = held_enemy_team.duplicate()
+		manual_history = []
+		manual_picker.open()
+		refresh_manual_draft(false)
+	else:
+		reset_draft_memory()
+		force_new_recommendation()
+
+# In draft order, does the next pick go to the user's team?
+func next_manual_pick_is_users() -> bool:
+	var turn = manual_user_team.size() + manual_enemy_team.size()
+	if turn >= FIRST_PICK_TURNS.size():
+		return false
+	var users = FIRST_PICK_TURNS[turn] == is_user_first_pick
+	# Teams entered out of draft order: fall back to the side that still has room
+	if users and manual_user_team.size() >= 5:
+		return false
+	if not users and manual_enemy_team.size() >= 5:
+		return true
+	return users
+
+func _on_manual_hero_chosen(code: String, target: int):
+	var drafted = manual_user_team.has(code) or manual_enemy_team.has(code)
+	var bans_changed = false
+	if target == ManualPicker.Target.BAN:
+		# Post-draft ban: only a hero that is in one of the teams
+		if manual_user_team.has(code):
+			manual_history.append([target, code, user_banned])
+			user_banned = code
+		elif manual_enemy_team.has(code):
+			manual_history.append([target, code, enemy_banned])
+			enemy_banned = code
+		else:
+			return
+		bans_changed = true
+	elif drafted or prebans.has(code):
+		return
+	elif target == ManualPicker.Target.PREBAN:
+		if prebans.size() >= 4:
+			return
+		prebans.append(code)
+		manual_history.append([target, code, ""])
+	else:
+		var to_user = target == ManualPicker.Target.MY_TEAM or (target == ManualPicker.Target.DRAFT_ORDER and next_manual_pick_is_users())
+		var team = manual_user_team if to_user else manual_enemy_team
+		if team.size() >= 5:
+			return
+		team.append(code)
+		manual_history.append([ManualPicker.Target.MY_TEAM if to_user else ManualPicker.Target.ENEMY_TEAM, code, ""])
+	refresh_manual_draft(bans_changed)
+
+func _on_manual_undo():
+	if manual_history.is_empty():
+		return
+	var last = manual_history.pop_back()
+	var hero = last[1]
+	match last[0]:
+		ManualPicker.Target.BAN:
+			if user_banned == hero:
+				user_banned = last[2]
+			else:
+				enemy_banned = last[2]
+		ManualPicker.Target.PREBAN:
+			prebans.erase(hero)
+		ManualPicker.Target.MY_TEAM:
+			manual_user_team.erase(hero)
+		ManualPicker.Target.ENEMY_TEAM:
+			manual_enemy_team.erase(hero)
+	refresh_manual_draft(true)
+
+func _on_manual_clear():
+	reset_draft_memory()
+	manual_user_team = []
+	manual_enemy_team = []
+	manual_history = []
+	refresh_manual_draft(false)
+
+# Redraw the hand-entered draft and ask for new suggestions
+func refresh_manual_draft(bans_changed: bool):
+	full_user_team = manual_user_team.duplicate() if manual_user_team.size() == 5 else []
+	full_enemy_team = manual_enemy_team.duplicate() if manual_enemy_team.size() == 5 else []
+	# A ban only stands while its hero is still in the team
+	if not manual_user_team.has(user_banned):
+		user_banned = ""
+	if not manual_enemy_team.has(enemy_banned):
+		enemy_banned = ""
+	force_new_recommendation()
+	# Copies, so that later picks are seen as a change
+	show_draft(manual_user_team.duplicate(), manual_enemy_team.duplicate(), bans_changed)
+
+	manual_picker.set_used(manual_user_team + manual_enemy_team + prebans)
+	var notes = []
+	if not prebans.is_empty():
+		notes.append("Prebans: " + ", ".join(prebans.map(manual_picker.hero_name)))
+	if manual_user_team.size() + manual_enemy_team.size() < 10:
+		notes.append("Next in draft order: " + ("My Team" if next_manual_pick_is_users() else "Enemy Team"))
+	else:
+		notes.append("Draft complete. Set the target to Ban to mark banned heroes")
+	if user_banned != "":
+		notes.append("My " + manual_picker.hero_name(user_banned) + " banned")
+	if enemy_banned != "":
+		notes.append("Enemy " + manual_picker.hero_name(enemy_banned) + " banned")
+	manual_picker.set_status("  |  ".join(notes))
