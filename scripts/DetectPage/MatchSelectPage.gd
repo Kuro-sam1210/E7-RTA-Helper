@@ -64,6 +64,8 @@ const ManualPicker = preload("res://scripts/DetectPage/ManualPicker.gd")
 const FIRST_PICK_TURNS = [true, false, false, true, true, false, false, true, true, false]
 var manual_mode = false
 var manual_picker
+# One line under the panels: where to stand each hero once the draft is complete
+var formation_label: Label
 var manual_user_team = []
 var manual_enemy_team = []
 var manual_history = [] # [target, hero, previously banned hero] per entry, for undo
@@ -135,6 +137,18 @@ func _ready():
 	manual_picker.clear_pressed.connect(self._on_manual_clear)
 	$CanvasLayer.add_child(manual_picker)
 	$CanvasLayer.move_child(manual_picker, $CanvasLayer/PauseScreen.get_index())
+
+	formation_label = Label.new()
+	formation_label.anchor_left = 0.04
+	formation_label.anchor_top = 0.968
+	formation_label.anchor_right = 0.968
+	formation_label.anchor_bottom = 0.998
+	formation_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	formation_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	formation_label.clip_text = true
+	formation_label.add_theme_font_size_override("font_size", 13)
+	$CanvasLayer.add_child(formation_label)
+	$CanvasLayer.move_child(formation_label, $CanvasLayer/PauseScreen.get_index())
 
 	#print(await GlobalVars.get_user_data('khhm'))
 	
@@ -240,6 +254,23 @@ func request_ban_suggestions():
 	print('ban url: '+url)
 	ban_http_request.request(url)
 
+func hero_display_name(code) -> String:
+	for hero in GlobalVars.hero_names:
+		if hero['code'] == str(code):
+			return hero['name']
+	return str(code)
+
+# Where top players stand these heroes, with how often they use that slot
+func show_formation(formation: Array, assumed_ban):
+	var slots = []
+	for entry in formation:
+		slots.append("%s: %s (%d%%)" % [entry['position'], hero_display_name(entry['hero']), round(float(entry['share']) * 100)])
+	var text = "   ".join(slots)
+	if text != "" and assumed_ban != null:
+		text += "   [if " + hero_display_name(assumed_ban) + " is banned]"
+	formation_label.text = text
+	formation_label.tooltip_text = text
+
 func _on_ban_suggestions_completed(result, response_code, headers, body):
 	if response_code != 200:
 		# Ban model missing or teams incomplete: keep the pick view as is
@@ -249,6 +280,7 @@ func _on_ban_suggestions_completed(result, response_code, headers, body):
 	json.parse(body.get_string_from_utf8())
 	var Bans = json.get_data()
 	$CanvasLayer/UserPickData.emit_signal('show_ban_suggestions', Bans['ban_suggestions'], Bans['likely_enemy_bans'])
+	show_formation(Bans.get('formation', []), Bans.get('formation_assumed_ban'))
 	# Expected win rate once both sides make their best ban
 	$CanvasLayer/MatchSelect/Container/ColorRect/WinPredictionBar.value = float(Bans['win_prediction'])*100
 
@@ -373,6 +405,7 @@ func show_draft(user_picks: Array, enemy_picks: Array, bans_changed: bool):
 		var first_pick_team = "My Team" if is_user_first_pick else "Enemy Team"
 		last_user_team = user_team
 		last_enemy_team = enemy_team
+		formation_label.text = ""
 		var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&prebans="+",".join(prebans)
 		print('url: '+url)
 		misc_http_request.request(url)

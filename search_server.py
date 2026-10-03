@@ -19,6 +19,7 @@ import tensorflow as tf
 from attention import Attention
 import ast
 from win_model import WinModel
+from formation import Formation
 
 # For updating
 from packaging.version import Version
@@ -462,6 +463,7 @@ def recommend_characters():
 win_model = None
 rule_encoder = None
 roster_built = set()
+formation = Formation.load_if_available()
 
 @app.route('/recommend_ban', methods=['GET'])
 def recommend_ban():
@@ -481,6 +483,15 @@ def recommend_ban():
             rule=request.args.get('rule'),
             user_banned=request.args.get('user_banned'),
             enemy_banned=request.args.get('enemy_banned'))
+        if formation is not None:
+            # Where to stand the four heroes left after the enemy's ban. Until that ban is
+            # known, assume the one we expect.
+            banned = request.args.get('user_banned')
+            assumed = not banned and bool(result.get('likely_enemy_bans'))
+            if assumed:
+                banned = result['likely_enemy_bans'][0]['hero']
+            result['formation'] = formation.suggest([h for h in user_picks[:5] if h != banned])
+            result['formation_assumed_ban'] = banned if assumed else None
         return jsonify(result), 200
     except ValueError as e:
         return jsonify({"message": str(e)}), 400

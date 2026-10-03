@@ -30,3 +30,6 @@ search_server_port.txt
 
 # Personal roster written by import_roster.py
 my_roster.json
+
+# Team position cache from workflow_scripts/get_hero_positions.py
+match_histories/positions_*.jsonl
