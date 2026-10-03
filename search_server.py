@@ -264,6 +264,7 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
         most_picks = [h for h in most_picked if h not in prebans][:10]
         return jsonify({
         'top_10_heroes': most_picks,
+        'pick_win_rates': [],
         'win_prediction': str(0.5)
         }), 200
 
@@ -271,6 +272,7 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
         most_picks = [h for h in most_picked if h not in prebans][:10]
         return jsonify({
         'top_10_heroes': most_picks,
+        'pick_win_rates': [],
         'win_prediction': str(0.5)
         }), 200
 
@@ -316,17 +318,20 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
 
     # Per-pick sequences built exactly like get_rec_model.py's training examples, from the
     # picks made so far (right-aligned, zero-padded):
-    #   team:            1 = our pick, 0 = enemy pick (LabelEncoder order: 'Enemy Team', 'My Team')
+    # relative to the team that picks next (the "picker"), which is how the hybrid ranking
+    # was evaluated; on our own turn the picker is us:
+    #   team:            1 = the picker's pick, 0 = the other team's
     #   first pick:      1 if the pick belongs to the first-pick team
-    #   first pick win:  1 on the first-pick team's picks when that team is us, i.e. the
-    #                    suggestions are conditioned on our team winning
+    #   first pick win:  1 on the first-pick team's picks when that team is the picker, i.e.
+    #                    the suggestions are conditioned on the picking team winning
     user_is_first = first_pick_team == 'My Team'
     pick_count = len(combined_sequence)
-    is_first_team = np.array([i in first_pick_index for i in range(pick_count)])
+    picker_is_first = pick_count in first_pick_index
+    is_first_team = np.array([i in first_pick_index for i in range(pick_count)], dtype=bool)
     full_pick_order_sequence = np.arange(1, pick_count + 1)
-    full_team_sequence = (is_first_team == user_is_first).astype(int)
+    full_team_sequence = (is_first_team == picker_is_first).astype(int)
     first_pick_sequence = is_first_team.astype(int)
-    first_pick_win_sequences = (is_first_team & user_is_first).astype(int)
+    first_pick_win_sequences = (is_first_team & picker_is_first).astype(int)
 
     # Ensure that the sequences do not contain any out-of-range indices before padding
     padded_sequence = np.clip(padded_sequence, 0, len(hero_encoder.classes_) - 1)
@@ -373,14 +378,25 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
     # Picked and prebanned heroes (prebans remove a hero for both players) cannot be suggested
     combined_hero_indices = set(picks_sequence_encoded)
     combined_hero_indices.update(hero_encoder.transform([h for h in prebans if h in available_heroes]))
+    combined_hero_indices.add(int(hero_encoder.transform(['unknown'])[0]))
     top_10_indices = np.argsort(prediction[0])[::-1]
     filtered_top_10_indices = [idx for idx in top_10_indices if idx not in combined_hero_indices][:10]
 
     top_10_heroes = hero_encoder.inverse_transform(filtered_top_10_indices)
+    pick_win_rates = []
 
     # Our win rate: from the win model when available, else the pick model's own win output
     if win_model is not None:
-        user_win = win_model.win_rate(*win_model_teams, first_pick_team == 'My Team', rule)
+        # The teams as detected, cut to the same draft-consistent lengths the pick model saw
+        value_teams = (win_model_teams[0][:len(user_team_picks)], win_model_teams[1][:len(enemy_team_picks)])
+        user_win = win_model.win_rate(*value_teams, user_is_first, rule)
+        # Re-order the candidates by pick likelihood and by how well each leaves the team that
+        # picks next
+        if pick_count < 10:
+            top_10_heroes, pick_win_rates = win_model.rerank_picks(
+                top_10_heroes, prediction[0][filtered_top_10_indices], *value_teams,
+                user_is_first, picker_is_first == user_is_first, rule)
+            top_10_heroes = np.array(top_10_heroes)
     else:
         user_win = win_prediction[0][0] if first_pick_team == 'My Team' else 1.0 - win_prediction[0][0]
 
@@ -388,11 +404,14 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
     if len(user_team_picks) >= 5 and len(enemy_team_picks) >= 5:
         return jsonify({
         'top_10_heroes': [],
+        'pick_win_rates': [],
         'win_prediction': str(user_win)
         }), 200
 
     return jsonify({
         'top_10_heroes': top_10_heroes.tolist(),
+        # The picking team's win rate after each suggested pick (empty without a win model)
+        'pick_win_rates': pick_win_rates,
         'win_prediction': str(user_win)
     }), 200
 
