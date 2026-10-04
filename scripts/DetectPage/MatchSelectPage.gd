@@ -233,6 +233,7 @@ func _on_misc_server_completed(result, response_code, headers, body):
 		print("Rec: " + str(Recommendation['top_10_heroes']))
 		print("Rec: " + str(Recommendation['win_prediction']))		
 		
+		$CanvasLayer/UserPickData.set_pick_win_rates(Recommendation.get('pick_win_rates', []), Recommendation.get('picker_is_user', true))
 		$CanvasLayer/UserPickData.emit_signal('show_recommendation', Recommendation['top_10_heroes'])
 
 		# Set Win Prediction

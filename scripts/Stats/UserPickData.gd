@@ -38,6 +38,25 @@ extends Node
 @onready var hero_data = GlobalVars.hero_data
 
 signal show_recommendation(recommendation: Array)
+
+# Win model's estimate for the picking team after each suggestion, in the same order as the
+# next recommendation (empty: show the season win rate instead)
+var pick_win_rates = []
+var picker_is_user = true
+const LABEL_FONT_SIZE = 15
+const ESTIMATE_FONT_SIZE = 19
+const BEST_FOR_US = Color(0.35, 1.0, 0.45)
+const BEST_FOR_THEM = Color(1.0, 0.45, 0.4)
+
+func set_pick_win_rates(rates: Array, by_user: bool):
+	pick_win_rates = rates
+	picker_is_user = by_user
+
+func reset_labels():
+	for label in labels:
+		label.text = ""
+		label.add_theme_font_size_override("font_size", LABEL_FONT_SIZE)
+		label.remove_theme_color_override("font_color")
 signal show_ban_suggestions(ban_suggestions: Array, likely_enemy_bans: Array)
 signal show_counters(character: String)
 signal show_synergies(character: String)
@@ -63,8 +82,7 @@ func set_hero_portrait(portrait, hero: String):
 func on_show_ban_suggestions(ban_suggestions: Array, likely_enemy_bans: Array):
 	for portrait in portraits:
 		portrait.texture = load('res://UI/MatchSelect/unknown_hero.png')
-	for label in labels:
-		label.text = ""
+	reset_labels()
 	for i in range(min(5, len(ban_suggestions))):
 		set_hero_portrait(portraits[i], str(ban_suggestions[i]['hero']))
 		labels[i].text = "BAN  WR %.1f%%" % (float(ban_suggestions[i]['worst_case_win_rate']) * 100)
@@ -76,8 +94,9 @@ func on_show_recommendation(recommendation: Array):
 	# First reset all portraits and labels
 	for portrait in portraits:
 		portrait.texture = load('res://UI/MatchSelect/unknown_hero.png')
-	for label in labels:
-		label.text = ""
+	reset_labels()
+	var estimates = pick_win_rates if len(pick_win_rates) == len(recommendation) else []
+	pick_win_rates = []
 	print('rec len: ' + str(len(recommendation)))
 	# Now show recommendations. Every recommended hero is drawn, even without a stats row
 	# (new heroes would otherwise be skipped and leave gaps in the grid)
@@ -87,10 +106,18 @@ func on_show_recommendation(recommendation: Array):
 		if i >= len(portraits):
 			break
 		set_hero_portrait(portraits[i], str(rec))
-		labels[i].text = "WR —"
-		for chars in hero_data:
-			if chars['Hero'] == rec and str(chars['Win Rate']).is_valid_float():
-				labels[i].text = "WR " + str(chars['Win Rate'])+"%"
+		if not estimates.is_empty():
+			# This draft's estimate for the picking team if it takes this hero: ours on our
+			# turn, the enemy's on theirs. The best one is highlighted.
+			labels[i].text = ("WIN %d%%" if picker_is_user else "THEM %d%%") % round(float(estimates[i]) * 100)
+			labels[i].add_theme_font_size_override("font_size", ESTIMATE_FONT_SIZE)
+			if float(estimates[i]) >= float(estimates.max()):
+				labels[i].add_theme_color_override("font_color", BEST_FOR_US if picker_is_user else BEST_FOR_THEM)
+		else:
+			labels[i].text = "WR —"
+			for chars in hero_data:
+				if chars['Hero'] == rec and str(chars['Win Rate']).is_valid_float():
+					labels[i].text = "WR " + str(chars['Win Rate'])+"%"
 		i += 1
 	
 func on_show_counters(character: String):

@@ -433,6 +433,7 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
         'top_10_heroes': top_10_heroes.tolist(),
         # The picking team's win rate after each suggested pick (empty without a win model)
         'pick_win_rates': pick_win_rates,
+        'picker_is_user': bool(picker_is_first == user_is_first),
         'win_prediction': str(user_win)
     }), 200
 
