@@ -36,3 +36,6 @@ match_histories/positions_*.jsonl
 
 # The helper's record of drafts it has seen (draft_log.py)
 my_drafts.jsonl
+
+# Raw hero entries cached by workflow_scripts/get_hero_kits.py
+match_histories/kits/
