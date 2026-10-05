@@ -33,3 +33,6 @@ my_roster.json
 
 # Team position cache from workflow_scripts/get_hero_positions.py
 match_histories/positions_*.jsonl
+
+# The helper's record of drafts it has seen (draft_log.py)
+my_drafts.jsonl

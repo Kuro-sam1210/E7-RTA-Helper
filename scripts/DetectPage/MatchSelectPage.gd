@@ -250,11 +250,15 @@ func _on_misc_server_completed(result, response_code, headers, body):
 		# Set Win Prediction to 50%
 		$CanvasLayer/MatchSelect/Container/ColorRect/WinPredictionBar.value = 50.0
 
+# How this draft reached the app, recorded with it in the server's draft log
+func draft_source() -> String:
+	return "manual" if manual_mode else "detect"
+
 func request_ban_suggestions():
 	if ban_http_request.get_http_client_status() != 0:
 		ban_http_request.cancel_request()
 	var first_pick_team = "My Team" if is_user_first_pick else "Enemy Team"
-	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend_ban"+"?user_picks="+last_user_team+"&enemy_picks="+last_enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&user_banned="+user_banned+"&enemy_banned="+enemy_banned
+	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend_ban"+"?user_picks="+last_user_team+"&enemy_picks="+last_enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&user_banned="+user_banned+"&enemy_banned="+enemy_banned+"&source="+draft_source()
 	print('ban url: '+url)
 	ban_http_request.request(url)
 
@@ -410,7 +414,7 @@ func show_draft(user_picks: Array, enemy_picks: Array, bans_changed: bool):
 		last_user_team = user_team
 		last_enemy_team = enemy_team
 		formation_label.text = ""
-		var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&prebans="+",".join(prebans)
+		var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&prebans="+",".join(prebans)+"&source="+draft_source()
 		print('url: '+url)
 		misc_http_request.request(url)
 

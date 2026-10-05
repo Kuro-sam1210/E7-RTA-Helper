@@ -20,6 +20,7 @@ from attention import Attention
 import ast
 from win_model import WinModel
 from formation import Formation
+import draft_log
 
 # For updating
 from packaging.version import Version
@@ -453,6 +454,14 @@ def recommend_characters():
         
         prebans =[h for h in request.args.get('prebans', '').split(',') if h]
         result = predict_next_hero(enemy_picks, user_picks, first_pick_team, prebans, request.args.get('rule'))
+        # Keep what was shown, for reviewing the game later
+        if isinstance(result, tuple) and result[1] == 200:
+            shown = result[0].get_json()
+            draft_log.log_event('pick', source=request.args.get('source', ''), user_picks=user_picks,
+                                enemy_picks=enemy_picks, first_pick_team=first_pick_team, prebans=prebans,
+                                rule=request.args.get('rule') or '', suggestions=shown.get('top_10_heroes'),
+                                win_estimates=shown.get('pick_win_rates'), picker_is_user=shown.get('picker_is_user'),
+                                win_prediction=shown.get('win_prediction'))
         return result
     
     except Exception as e:
@@ -493,6 +502,12 @@ def recommend_ban():
                 banned = result['likely_enemy_bans'][0]['hero']
             result['formation'] = formation.suggest([h for h in user_picks[:5] if h != banned])
             result['formation_assumed_ban'] = banned if assumed else None
+        draft_log.log_event('ban', source=request.args.get('source', ''), user_picks=user_picks[:5],
+                            enemy_picks=enemy_picks[:5], first_pick_team=request.args.get('first_pick_team'),
+                            rule=request.args.get('rule') or '', user_banned=request.args.get('user_banned') or '',
+                            enemy_banned=request.args.get('enemy_banned') or '',
+                            ban_suggestions=result.get('ban_suggestions'), likely_enemy_bans=result.get('likely_enemy_bans'),
+                            win_prediction=result.get('win_prediction'), formation=result.get('formation'))
         return jsonify(result), 200
     except ValueError as e:
         return jsonify({"message": str(e)}), 400
