@@ -97,6 +97,13 @@ def parse_team(team_info):
     return [hero_code(h['hero_code']) for h in sorted(heroes, key=lambda h: h['pick_order'])]
 
 
+def parse_team_details(team_info):
+    """Per hero, in pick order: where it stood (1 front .. 4 back, 0 banned), its gear sets and artifact."""
+    heroes = parse_fragment(team_info, 'my_team')
+    return [{'position': h.get('position'), 'sets': sorted(h.get('equip') or []), 'artifact': h.get('artifact')}
+            for h in sorted(heroes, key=lambda h: h['pick_order'])]
+
+
 def banned_hero(deck):
     return next((hero_code(h['hero_code']) for h in deck['hero_list'] if h.get('ban') == 1), None)
 
@@ -134,6 +141,14 @@ def parse_battle(battle):
         'rule': battle.get('opening_rule_title'),
         'my_grade': battle.get('grade_code'),
         'enemy_grade': battle.get('enemy_grade_code'),
+        # Kept for the formation, speed and coaching work; not used by the CSVs
+        'turns': battle.get('turn'),
+        'nick_no': battle.get('nicknameno'),
+        'enemy_nick_no': battle.get('matchPlayerNicknameno') or battle.get('enemy_nick_no'),
+        'server': battle.get('worldCode'),
+        'enemy_server': battle.get('enemy_world_code'),
+        'my_details': parse_team_details(battle['teamBettleInfo']),
+        'enemy_details': parse_team_details(battle['teamBettleInfoenemy']),
     }
 
 
@@ -157,7 +172,7 @@ def write_csvs(battles, matches_path, prebans_path):
     with gzip.open(matches_path, 'wt', newline='', encoding='utf-8') as matches_file, \
             gzip.open(prebans_path, 'wt', newline='', encoding='utf-8') as prebans_file:
         matches = csv.DictWriter(matches_file, lineterminator='\n', fieldnames=[
-            'Match Number', 'Pick Order', 'Match Result', 'Team', 'Hero', 'First Pick', 'Banned', 'Rule'])
+            'Match Number', 'Pick Order', 'Match Result', 'Team', 'Hero', 'First Pick', 'Banned', 'Rule', 'Date'])
         prebans = csv.DictWriter(prebans_file, lineterminator='\n', fieldnames=['Match Number', 'Team', 'Hero'])
         matches.writeheader()
         prebans.writeheader()
@@ -178,6 +193,8 @@ def write_csvs(battles, matches_path, prebans_path):
                         'First Pick': int(first),
                         'Banned': int(hero == banned),
                         'Rule': battle.get('rule') or '',
+                        # Day of the battle, for training on recent games and testing on later ones
+                        'Date': str(battle.get('date') or '')[:10],
                     })
                 for hero in team_prebans:
                     prebans.writerow({'Match Number': match_number, 'Team': team, 'Hero': hero})

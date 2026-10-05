@@ -34,6 +34,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--matches', default='data/epic7_match_history.csv.gz')
 parser.add_argument('--output-dir', default='data')
 parser.add_argument('--epochs', type=int, default=30)
+parser.add_argument('--old-before', help='matches before this day (YYYY-MM-DD, e.g. a balance patch) count as old')
+parser.add_argument('--old-weight', type=float, default=1.0, help='training weight of old matches (0 drops them)')
+parser.add_argument('--test-from', help='validate on matches from this day on instead of a random tenth')
 args = parser.parse_args()
 MODEL_PATH = f'{args.output_dir}/win_model.h5'
 HEROES_PATH = f'{args.output_dir}/win_model_heroes.json'
@@ -65,6 +68,12 @@ banned = (data['Banned'] == 1).to_numpy().reshape(num_matches, PICKS)
 my_first = data['First Pick'].to_numpy().reshape(num_matches, PICKS)[is_mine].reshape(num_matches, TEAM_SIZE)[:, 0]
 my_win = (data['Match Result'] == 'Win').to_numpy().reshape(num_matches, PICKS)[is_mine].reshape(num_matches, TEAM_SIZE)[:, 0]
 match_rule = data['Rule'].map(lambda r: rule_index.get(r, 0)).to_numpy().reshape(num_matches, PICKS)[:, 0]
+# Day of each match ('' when unknown, which counts as old)
+match_date = (data['Date'].fillna('').astype(str).to_numpy().reshape(num_matches, PICKS)[:, 0]
+              if 'Date' in data.columns else np.full(num_matches, ''))
+if (args.old_before or args.test_from) and 'Date' not in data.columns:
+    raise SystemExit('the match file has no Date column, rebuild it with get_matches.py --csv-only')
+match_weight = np.where(match_date < args.old_before, args.old_weight, 1.0) if args.old_before else np.ones(num_matches)
 
 # Each team's heroes in its own pick order, and how many each team has after k picks
 my_heroes = hero_ids[is_mine].reshape(num_matches, TEAM_SIZE)
@@ -97,7 +106,10 @@ match_of = np.tile(np.arange(num_matches), steps)
 
 # Split by match, then add every example from the other side as well
 is_val = np.zeros(num_matches, dtype=bool)
-is_val[np.random.default_rng(7).permutation(num_matches)[: num_matches // 10]] = True
+if args.test_from:
+    is_val = match_date >= args.test_from
+else:
+    is_val[np.random.default_rng(7).permutation(num_matches)[: num_matches // 10]] = True
 
 
 def both_sides(sel):
@@ -113,7 +125,9 @@ def both_sides(sel):
 
 
 val_sel = is_val[match_of]
-x_train, y_train, _, _ = both_sides(~val_sel)
+train_sel = ~val_sel & (match_weight[match_of] > 0)
+x_train, y_train, _, _ = both_sides(train_sel)
+w_train = np.tile(match_weight[match_of][train_sel], 2).astype(np.float32)
 x_val, y_val, val_stage, val_first = both_sides(val_sel)
 print(f'{num_matches} matches, {len(y_train)} training / {len(y_val)} validation examples, '
       f'{len(heroes) - 2} heroes, rules {rules[1:]}')
@@ -144,7 +158,8 @@ output = layers.Dense(1, activation='sigmoid', name='win')(hidden)
 model = Model(inputs, output)
 model.compile(optimizer=tf.keras.optimizers.Adam(1e-3), loss='binary_crossentropy',
               metrics=['accuracy', tf.keras.metrics.AUC(name='auc')])
-model.fit(x_train, y_train, validation_data=(x_val, y_val), batch_size=1024, epochs=args.epochs, verbose=2,
+model.fit(x_train, y_train, sample_weight=w_train, validation_data=(x_val, y_val), batch_size=1024,
+          epochs=args.epochs, verbose=2,
           callbacks=[EarlyStopping(monitor='val_loss', patience=2, restore_best_weights=True),
                      ModelCheckpoint(MODEL_PATH, monitor='val_loss', save_best_only=True)])
 
@@ -157,7 +172,9 @@ for s in range(1, PICKS + 2):
     sel = val_stage == s
     label = f'{s} picks' if s <= PICKS else 'after bans'
     print(f'{label:16s} | {correct[sel].mean():.3f}    | {baseline[sel].mean():.3f}')
-print(f'overall: accuracy {correct.mean():.4f}')
+clipped = np.clip(predictions, 1e-6, 1 - 1e-6)
+log_loss = -np.mean(y_val * np.log(clipped) + (1 - y_val) * np.log(1 - clipped))
+print(f'overall: accuracy {correct.mean():.4f}, log loss {log_loss:.4f}')
 tf.keras.models.save_model(model, MODEL_PATH, include_optimizer=False)
 
 with open(HEROES_PATH, 'w', encoding='utf-8') as file:
