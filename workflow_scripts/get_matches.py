@@ -152,6 +152,11 @@ def parse_battle(battle):
     }
 
 
+def has_details(battle):
+    """Rows cached before positions, gear and turn counts were kept lack them."""
+    return 'my_details' in battle
+
+
 def load_cache(path, today):
     """Cached battles, plus players already fetched today (so a later run refreshes them)."""
     battles, done_players = {}, set()
@@ -162,8 +167,9 @@ def load_cache(path, today):
                 if 'done_player' in record:
                     if record.get('day') == today:
                         done_players.add(record['done_player'])
-                else:
-                    battles.setdefault(record['battle_seq'], record)
+                elif record['battle_seq'] not in battles or has_details(record):
+                    # a later row for the same battle is one re-fetched with more detail
+                    battles[record['battle_seq']] = record
     return battles, done_players
 
 
@@ -258,7 +264,7 @@ def main():
                     queue.append((opponent, raw.get('enemy_world_code') or server))
                     queued.add(opponent)
                 battle = parse_battle(raw)
-                if battle and battle['battle_seq'] not in battles:
+                if battle and (battle['battle_seq'] not in battles or not has_details(battles[battle['battle_seq']])):
                     battles[battle['battle_seq']] = battle
                     cache.write(json.dumps(battle) + '\n')
                     new += 1
