@@ -72,6 +72,8 @@ var result_box: HBoxContainer
 var result_label: Label
 var result_http_request: HTTPRequest
 var last_draft = {}
+# Changes with every new draft, so the server's draft log can tell drafts apart
+var draft_id = ""
 var manual_user_team = []
 var manual_enemy_team = []
 var manual_history = [] # [target, hero, previously banned hero] per entry, for undo
@@ -182,6 +184,7 @@ func _ready():
 
 	#print(await GlobalVars.get_user_data('khhm'))
 	
+	new_draft_id()
 	SettingManager.update_data()
 	CropTopValue = str(SettingManager.CropTopValue)
 	CropBotValue = str(SettingManager.CropBotValue)
@@ -284,7 +287,7 @@ func draft_source() -> String:
 func _on_result_pressed(outcome: String):
 	if last_draft.is_empty():
 		return
-	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/draft_result?result="+outcome+"&user_picks="+last_draft['user']+"&enemy_picks="+last_draft['enemy']+"&first_pick_team="+last_draft['first'].uri_encode()+"&rule="+last_draft['rule']+"&source="+last_draft['source']
+	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/draft_result?result="+outcome+"&user_picks="+last_draft['user']+"&enemy_picks="+last_draft['enemy']+"&first_pick_team="+last_draft['first'].uri_encode()+"&rule="+last_draft['rule']+"&source="+last_draft['source']+"&draft="+last_draft['draft']
 	if result_http_request.get_http_client_status() != 0:
 		result_http_request.cancel_request()
 	result_http_request.request(url)
@@ -294,7 +297,7 @@ func request_ban_suggestions():
 	if ban_http_request.get_http_client_status() != 0:
 		ban_http_request.cancel_request()
 	var first_pick_team = "My Team" if is_user_first_pick else "Enemy Team"
-	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend_ban"+"?user_picks="+last_user_team+"&enemy_picks="+last_enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&user_banned="+user_banned+"&enemy_banned="+enemy_banned+"&source="+draft_source()
+	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend_ban"+"?user_picks="+last_user_team+"&enemy_picks="+last_enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&user_banned="+user_banned+"&enemy_banned="+enemy_banned+"&source="+draft_source()+"&draft="+draft_id
 	print('ban url: '+url)
 	ban_http_request.request(url)
 
@@ -339,7 +342,11 @@ func hero_at_height(team: Array, heights: Array, y) -> String:
 			best = str(team[i])
 	return best
 
+func new_draft_id():
+	draft_id = str(Time.get_unix_time_from_system()).replace(".", "") + str(randi() % 1000)
+
 func reset_draft_memory():
+	new_draft_id()
 	draft_had_picks = false
 	held_user_team = []
 	held_user_y = []
@@ -442,7 +449,7 @@ func show_draft(user_picks: Array, enemy_picks: Array, bans_changed: bool):
 
 	# A newly completed draft: offer to record how its game went
 	if user_picks.size() >= 5 and enemy_picks.size() >= 5 and (last_draft.get('user') != user_team or last_draft.get('enemy') != enemy_team):
-		last_draft = {'user': user_team, 'enemy': enemy_team, 'first': "My Team" if is_user_first_pick else "Enemy Team", 'rule': rule, 'source': draft_source()}
+		last_draft = {'user': user_team, 'enemy': enemy_team, 'first': "My Team" if is_user_first_pick else "Enemy Team", 'rule': rule, 'source': draft_source(), 'draft': draft_id}
 		result_label.text = "Last game:"
 		result_box.visible = true
 
@@ -456,7 +463,7 @@ func show_draft(user_picks: Array, enemy_picks: Array, bans_changed: bool):
 		last_user_team = user_team
 		last_enemy_team = enemy_team
 		formation_label.text = ""
-		var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&prebans="+",".join(prebans)+"&source="+draft_source()
+		var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend"+"?user_picks="+user_team+"&enemy_picks="+enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&prebans="+",".join(prebans)+"&source="+draft_source()+"&draft="+draft_id
 		print('url: '+url)
 		misc_http_request.request(url)
 
@@ -552,7 +559,13 @@ func _on_manual_toggled(enabled: bool):
 		manual_picker.set_target(ManualPicker.Target.PREBAN if fresh else manual_stage_target())
 		refresh_manual_draft(false)
 	else:
+		# Detection takes over mid-draft: it no longer looks for prebans once picks are under
+		# way, so what was entered by hand stays
+		var kept = [prebans, user_banned, enemy_banned]
 		reset_draft_memory()
+		prebans = kept[0]
+		user_banned = kept[1]
+		enemy_banned = kept[2]
 		force_new_recommendation()
 
 func manual_draft_complete() -> bool:
@@ -568,6 +581,8 @@ func _on_manual_next():
 
 func _on_suggestion_clicked(code: String):
 	if manual_mode:
+		if manual_picker.target_selector.selected == ManualPicker.Target.PREBAN:
+			manual_picker.set_target(manual_stage_target())
 		_on_manual_hero_chosen(code, manual_picker.target_selector.selected)
 
 # In draft order, does the next pick go to the user's team?
@@ -656,9 +671,14 @@ func refresh_manual_draft(bans_changed: bool):
 		user_banned = ""
 	if not manual_enemy_team.has(enemy_banned):
 		enemy_banned = ""
-	force_new_recommendation()
-	# Copies, so that later picks are seen as a change
-	show_draft(manual_user_team.duplicate(), manual_enemy_team.duplicate(), bans_changed)
+	if bans_changed and full_user_team.size() == 5 and full_enemy_team.size() == 5:
+		last_user_team = ",".join(full_user_team)
+		last_enemy_team = ",".join(full_enemy_team)
+		request_ban_suggestions()
+	else:
+		force_new_recommendation()
+		# Copies, so that later picks are seen as a change
+		show_draft(manual_user_team.duplicate(), manual_enemy_team.duplicate(), bans_changed)
 
 	manual_picker.set_used(manual_user_team + manual_enemy_team + prebans)
 	var notes = []

@@ -1,7 +1,8 @@
 """A local record of the drafts the helper has seen, for reviewing games afterwards.
 
 search_server.py appends one line to my_drafts.jsonl each time the app asks for suggestions or
-ban advice: the draft so far, what was suggested and the win estimates. The file is personal and
+ban advice: the draft so far, what was suggested and the win estimates, with the id the app gives
+each draft. The file is personal and
 gitignored. load_drafts() groups those lines back into drafts. Results are not known to the app
 unless the player clicks Won or Lost afterwards ("result" events); otherwise a review matches
 drafts to the official battle records by their ten heroes.
@@ -52,20 +53,28 @@ def load_drafts(path=LOG_FILE, source=None):
     for event in load_events(path):
         if source and event.get('source') != source:
             continue
+        draft_id = event.get('draft')
+        same_id = next((d for d in reversed(drafts) if draft_id and d['steps'][0].get('draft') == draft_id
+                        and d['steps'][0]['source'] == event['source']), None)
         if event['kind'] == 'result':
-            # Clicked after the game, when a newer draft may already be under way: goes with
-            # the latest draft of those ten heroes
-            match = next((d for d in reversed(drafts) if d['steps'][-1]['user_picks'] == event['user_picks']
-                          and d['steps'][-1]['enemy_picks'] == event['enemy_picks']), None)
+            # Clicked after the game, when a newer draft may already be under way: goes with its
+            # own draft, or (older logs) the latest draft of those ten heroes
+            match = same_id or next((d for d in reversed(drafts) if d['steps'][-1]['user_picks'] == event['user_picks']
+                                     and d['steps'][-1]['enemy_picks'] == event['enemy_picks']), None)
             if match:
                 match['steps'].append(event)
             continue
-        if drafts and continues(drafts[-1]['steps'][-1], event):
+        if same_id:
+            same_id['steps'].append(event)
+        elif not draft_id and drafts and not drafts[-1]['steps'][0].get('draft') and continues(drafts[-1]['steps'][-1], event):
             drafts[-1]['steps'].append(event)
         else:
             drafts.append({'steps': [event]})
     for draft in drafts:
-        last = next(step for step in reversed(draft['steps']) if step['kind'] != 'result')
+        # The fullest state seen, latest first: a misread frame must not stand for the draft
+        states = [step for step in draft['steps'] if step['kind'] != 'result']
+        most = max(len(step['user_picks']) + len(step['enemy_picks']) for step in states)
+        last = next(step for step in reversed(states) if len(step['user_picks']) + len(step['enemy_picks']) == most)
         bans = [step for step in draft['steps'] if step['kind'] == 'ban']
         draft.update(started=draft['steps'][0]['time'], source=last['source'], rule=last.get('rule') or '',
                      first_pick_team=last['first_pick_team'], user_picks=last['user_picks'],

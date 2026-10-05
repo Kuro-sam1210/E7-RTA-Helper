@@ -453,11 +453,12 @@ def recommend_characters():
             return jsonify({"message": "Please provide enemy_picks and user_picks and first_pick_team"}), 400
         
         prebans =[h for h in request.args.get('prebans', '').split(',') if h]
-        result = predict_next_hero(enemy_picks, user_picks, first_pick_team, prebans, request.args.get('rule'))
+        # Copies: predict_next_hero renames heroes it does not know, and the log needs the real codes
+        result = predict_next_hero(list(enemy_picks), list(user_picks), first_pick_team, prebans, request.args.get('rule'))
         # Keep what was shown, for reviewing the game later
         if isinstance(result, tuple) and result[1] == 200:
             shown = result[0].get_json()
-            draft_log.log_event('pick', source=request.args.get('source', ''), user_picks=user_picks,
+            draft_log.log_event('pick', source=request.args.get('source', ''), draft=request.args.get('draft', ''), user_picks=user_picks,
                                 enemy_picks=enemy_picks, first_pick_team=first_pick_team, prebans=prebans,
                                 rule=request.args.get('rule') or '', suggestions=shown.get('top_10_heroes'),
                                 win_estimates=shown.get('pick_win_rates'), picker_is_user=shown.get('picker_is_user'),
@@ -497,12 +498,14 @@ def recommend_ban():
             # Where to stand the four heroes left after the enemy's ban. Until that ban is
             # known, assume the one we expect.
             banned = request.args.get('user_banned')
+            if banned not in user_picks[:5]:
+                banned = None
             assumed = not banned and bool(result.get('likely_enemy_bans'))
             if assumed:
                 banned = result['likely_enemy_bans'][0]['hero']
             result['formation'] = formation.suggest([h for h in user_picks[:5] if h != banned])
             result['formation_assumed_ban'] = banned if assumed else None
-        draft_log.log_event('ban', source=request.args.get('source', ''), user_picks=user_picks[:5],
+        draft_log.log_event('ban', source=request.args.get('source', ''), draft=request.args.get('draft', ''), user_picks=user_picks[:5],
                             enemy_picks=enemy_picks[:5], first_pick_team=request.args.get('first_pick_team'),
                             rule=request.args.get('rule') or '', user_banned=request.args.get('user_banned') or '',
                             enemy_banned=request.args.get('enemy_banned') or '',
@@ -522,7 +525,7 @@ def draft_result():
     result = request.args.get('result')
     if result not in ('win', 'loss'):
         return jsonify({"message": "result must be win or loss"}), 400
-    draft_log.log_event('result', source=request.args.get('source', ''), result=result,
+    draft_log.log_event('result', source=request.args.get('source', ''), draft=request.args.get('draft', ''), result=result,
                         user_picks=[h for h in request.args.get('user_picks', '').split(',') if h],
                         enemy_picks=[h for h in request.args.get('enemy_picks', '').split(',') if h],
                         first_pick_team=request.args.get('first_pick_team'), rule=request.args.get('rule') or '')

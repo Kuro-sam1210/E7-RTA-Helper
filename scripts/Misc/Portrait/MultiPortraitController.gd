@@ -30,6 +30,10 @@ func set_portraits(character_array):
 			break
 		print('setting ' + character)
 		var image = Image.load_from_file('dataset/'+str(character)+'/c.png')
+		if image == null:
+			# A hero without a portrait keeps the placeholder
+			i+=1
+			continue
 		var texture = ImageTexture.create_from_image(image)
 		texture.resource_name = 'dataset/'+str(character)+'/c.png'		
 		portraits[i].texture = texture #load the texture

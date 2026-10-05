@@ -42,8 +42,8 @@ class Formation:
 
     def suggest(self, team):
         """Most likely arrangement of the four fielded heroes: [{hero, slot, position, share}]."""
-        team = list(team)[:len(SLOTS)]
-        if len(team) < len(SLOTS):
+        team = list(team)
+        if len(team) != len(SLOTS):
             return []
         shares = {hero: self.slot_shares(hero, [mate for mate in team if mate != hero]) for hero in team}
         best = max(itertools.permutations(SLOTS),
