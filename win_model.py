@@ -22,11 +22,13 @@ HEROES_PATH = 'data/win_model_heroes.json'
 EMPTY, UNKNOWN = 0, 1
 BAN_PROTECTED_SLOT = 2  # index of each team's third pick ("Ban Protection" in the draft screen)
 # Weight of the win model's value against the pick model's log-probability when ordering pick
-# suggestions. On 8,735 matches held out by both models, weight 1 keeps the actual pick in the
-# top 3 exactly as often as pure imitation (45.8%) and changes the #1 suggestion in 14% of
-# decisions; weight 2 loses 0.9 points and changes 24%. On 1,022 fresh matches weight 1 gained
-# +0.7 points of top-3 (95% CI +0.3 to +1.2) against +0.3 (-0.3 to +0.9) for weight 2.
-PICK_VALUE_WEIGHT = 1.0
+# suggestions. Chosen for winning, not for matching what players pick: on 8,735 matches held out
+# by both models (78,615 decisions), players whose pick was our #1 won 53.8% at weight 1, 55.1%
+# at 4 and 55.3% at 8, while the actual pick stays in our top 3 in 45.8% / 43.2% / 39.9% of
+# decisions. Where weights 1 and 4 disagree on #1, players who took the weight-4 pick won 56.8%
+# against 50.3%. Log-probabilities spread about six times wider than the value term, so a
+# weight of 1 was close to pure popularity.
+PICK_VALUE_WEIGHT = 4.0
 
 
 class WinModel:

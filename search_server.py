@@ -278,9 +278,14 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
         if roster_built:
             most_picks = [h for h in most_picks if h in roster_built] or most_picks
         most_picks = most_picks[:10]
+        # Our win estimate after each opener, for the labels (order stays by how often it is opened)
+        opener_win_rates = []
+        if win_model is not None:
+            opener_win_rates = [win_model.win_rate([hero], [], True, rule) for hero in most_picks]
         return jsonify({
         'top_10_heroes': most_picks,
-        'pick_win_rates': [],
+        'pick_win_rates': opener_win_rates,
+        'picker_is_user': True,
         'win_prediction': str(0.5)
         }), 200
 
