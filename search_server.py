@@ -411,6 +411,7 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
 
     top_10_heroes = hero_encoder.inverse_transform(filtered_top_10_indices)
     pick_win_rates = []
+    pick_reasons = []
 
     # Our win rate: from the win model when available, else the pick model's own win output
     if win_model is not None:
@@ -423,6 +424,9 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
             top_10_heroes, pick_win_rates = win_model.rerank_picks(
                 top_10_heroes, prediction[0][filtered_top_10_indices], *value_teams,
                 user_is_first, picker_is_first == user_is_first, rule)
+            # On our own turn, what each suggestion's value depends on
+            if picker_is_first == user_is_first:
+                pick_reasons = win_model.explain_picks(top_10_heroes, *value_teams, user_is_first, rule)
             top_10_heroes = np.array(top_10_heroes)
     else:
         user_win = win_prediction[0][0] if first_pick_team == 'My Team' else 1.0 - win_prediction[0][0]
@@ -439,6 +443,8 @@ def predict_next_hero(enemy_team_picks, user_team_picks, first_pick_team, preban
         'top_10_heroes': top_10_heroes.tolist(),
         # The picking team's win rate after each suggested pick (empty without a win model)
         'pick_win_rates': pick_win_rates,
+        # Per suggestion on our turn: the drafted heroes its value depends on (see WinModel.explain_picks)
+        'pick_reasons': pick_reasons,
         'picker_is_user': bool(picker_is_first == user_is_first),
         'win_prediction': str(user_win)
     }), 200
@@ -466,7 +472,8 @@ def recommend_characters():
             draft_log.log_event('pick', source=request.args.get('source', ''), draft=request.args.get('draft', ''), user_picks=user_picks,
                                 enemy_picks=enemy_picks, first_pick_team=first_pick_team, prebans=prebans,
                                 rule=request.args.get('rule') or '', suggestions=shown.get('top_10_heroes'),
-                                win_estimates=shown.get('pick_win_rates'), picker_is_user=shown.get('picker_is_user'),
+                                win_estimates=shown.get('pick_win_rates'), reasons=shown.get('pick_reasons'),
+                                picker_is_user=shown.get('picker_is_user'),
                                 win_prediction=shown.get('win_prediction'))
         return result
     

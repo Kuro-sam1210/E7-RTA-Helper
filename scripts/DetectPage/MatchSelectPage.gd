@@ -265,6 +265,7 @@ func _on_misc_server_completed(result, response_code, headers, body):
 		
 		$CanvasLayer/UserPickData.set_pick_win_rates(Recommendation.get('pick_win_rates', []), Recommendation.get('picker_is_user', true))
 		$CanvasLayer/UserPickData.emit_signal('show_recommendation', Recommendation['top_10_heroes'])
+		show_pick_reasons(Recommendation)
 
 		# Set Win Prediction
 		$CanvasLayer/MatchSelect/Container/ColorRect/WinPredictionBar.value = float(Recommendation['win_prediction'])*100
@@ -300,6 +301,40 @@ func request_ban_suggestions():
 	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/recommend_ban"+"?user_picks="+last_user_team+"&enemy_picks="+last_enemy_team+"&first_pick_team="+first_pick_team.uri_encode()+"&rule="+rule+"&user_banned="+user_banned+"&enemy_banned="+enemy_banned+"&source="+draft_source()+"&draft="+draft_id
 	print('ban url: '+url)
 	ban_http_request.request(url)
+
+# Why a suggestion is rated as it is: the drafted heroes its value depends on, from the win
+# model itself (removing that hero changes the pick's value by this many points)
+func pick_reason_text(hero, reason, estimate) -> String:
+	var parts = []
+	for cause in reason.get('because', []):
+		var points = round(float(cause['points']) * 100)
+		var who = hero_display_name(cause['hero'])
+		if cause['side'] == 'enemy':
+			parts.append(("answers %s (+%d)" if points > 0 else "weaker into %s (%d)") % [who, points])
+		else:
+			parts.append(("works with %s (+%d)" if points > 0 else "overlaps with %s (%d)") % [who, points])
+	var text = "%s (%d%%)" % [hero_display_name(hero), round(float(estimate) * 100)]
+	if parts.is_empty():
+		return text + ": no single drafted hero explains it"
+	return text + ": " + ", ".join(parts)
+
+func show_pick_reasons(recommendation: Dictionary):
+	var heroes = recommendation.get('top_10_heroes', [])
+	var reasons = recommendation.get('pick_reasons', [])
+	var estimates = recommendation.get('pick_win_rates', [])
+	if len(reasons) != len(heroes) or len(estimates) != len(heroes) or heroes.is_empty():
+		return
+	var texts = []
+	for i in range(len(heroes)):
+		texts.append(pick_reason_text(heroes[i], reasons[i], estimates[i]))
+	$CanvasLayer/UserPickData.set_label_tooltips(texts)
+	# The line under the title explains the best-rated pick while the draft is under way
+	var best = 0
+	for i in range(len(estimates)):
+		if float(estimates[i]) > float(estimates[best]):
+			best = i
+	formation_label.text = "Why " + texts[best]
+	formation_label.tooltip_text = formation_label.text
 
 func hero_display_name(code) -> String:
 	for hero in GlobalVars.hero_names:

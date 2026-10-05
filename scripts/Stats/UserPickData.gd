@@ -52,9 +52,16 @@ func set_pick_win_rates(rates: Array, by_user: bool):
 	pick_win_rates = rates
 	picker_is_user = by_user
 
+# One explanation per suggestion, shown when hovering its label
+func set_label_tooltips(texts: Array):
+	for i in range(len(labels)):
+		labels[i].mouse_filter = Control.MOUSE_FILTER_STOP
+		labels[i].tooltip_text = str(texts[i]) if i < len(texts) else ""
+
 func reset_labels():
 	for label in labels:
 		label.text = ""
+		label.tooltip_text = ""
 		label.add_theme_font_size_override("font_size", LABEL_FONT_SIZE)
 		label.remove_theme_color_override("font_color")
 signal show_ban_suggestions(ban_suggestions: Array, likely_enemy_bans: Array)

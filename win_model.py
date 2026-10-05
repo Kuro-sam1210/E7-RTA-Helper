@@ -65,6 +65,36 @@ class WinModel:
         """Our win rate from the heroes each side has picked so far (before bans)."""
         return float(self._predict([user_team], [enemy_team], user_first_pick, rule, post_ban=0)[0])
 
+    def explain_picks(self, candidates, user_team, enemy_team, user_first_pick, rule=None, top=2, minimum=0.02):
+        """Which drafted heroes each candidate's value depends on, by removing them one at a time.
+
+        A candidate's gain is our win estimate with it minus without it. Taking one enemy hero out
+        of the draft and measuring the gain again shows how much of it was an answer to that hero
+        (positive) or blunted by it (negative); the same with one of our own heroes shows who the
+        pick works with. These are the win model's own numbers, so a stated reason is one it used.
+        Returns, per candidate: {'gain', 'because': [{'hero', 'side': 'enemy'|'own', 'points'}]}.
+        """
+        candidates = list(candidates)
+        variants = [(None, None)] + [('enemy', hero) for hero in enemy_team] + [('own', hero) for hero in user_team]
+        ours, theirs = [], []
+        for candidate in candidates:
+            for side, removed in variants:
+                mine = [hero for hero in user_team if not (side == 'own' and hero == removed)]
+                enemy = [hero for hero in enemy_team if not (side == 'enemy' and hero == removed)]
+                ours += [mine + [candidate], mine]
+                theirs += [enemy, enemy]
+        if not ours:
+            return []
+        wins = self._predict(ours, theirs, user_first_pick, rule, post_ban=0).reshape(len(candidates), len(variants), 2)
+        gains = wins[:, :, 0] - wins[:, :, 1]
+        explained = []
+        for gain in gains:
+            because = [{'hero': removed, 'side': side, 'points': float(gain[0] - gain[i])}
+                       for i, (side, removed) in enumerate(variants) if side]
+            because = sorted((b for b in because if abs(b['points']) >= minimum), key=lambda b: -abs(b['points']))
+            explained.append({'gain': float(gain[0]), 'because': because[:top]})
+        return explained
+
     def rerank_picks(self, candidates, pick_probabilities, user_team, enemy_team, user_first_pick,
                      picker_is_user, rule=None, value_weight=PICK_VALUE_WEIGHT):
         """Order the pick model's candidates by imitation and value together.
