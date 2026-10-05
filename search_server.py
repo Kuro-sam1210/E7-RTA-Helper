@@ -516,6 +516,19 @@ def recommend_ban():
         return jsonify({"message": f"Error: {str(e)}"}), 500
 
 
+@app.route('/draft_result', methods=['GET'])
+def draft_result():
+    """Record how the game of a finished draft ended (result=win or loss), in the draft log."""
+    result = request.args.get('result')
+    if result not in ('win', 'loss'):
+        return jsonify({"message": "result must be win or loss"}), 400
+    draft_log.log_event('result', source=request.args.get('source', ''), result=result,
+                        user_picks=[h for h in request.args.get('user_picks', '').split(',') if h],
+                        enemy_picks=[h for h in request.args.get('enemy_picks', '').split(',') if h],
+                        first_pick_team=request.args.get('first_pick_team'), rule=request.args.get('rule') or '')
+    return jsonify({"message": "recorded"}), 200
+
+
 @app.route('/status', methods=['GET'])
 def status():
     return jsonify({"message": "Server is running"}), 200

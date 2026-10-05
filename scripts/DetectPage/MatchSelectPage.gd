@@ -66,6 +66,12 @@ var manual_mode = false
 var manual_picker
 # One line under the title: where to stand each hero once the draft is complete
 var formation_label: Label
+# Won / Lost buttons for the last completed draft; they stay until used, since the result is
+# only known after the draft has left the screen
+var result_box: HBoxContainer
+var result_label: Label
+var result_http_request: HTTPRequest
+var last_draft = {}
 var manual_user_team = []
 var manual_enemy_team = []
 var manual_history = [] # [target, hero, previously banned hero] per entry, for undo
@@ -141,15 +147,36 @@ func _ready():
 	$CanvasLayer.add_child(manual_picker)
 	$CanvasLayer.move_child(manual_picker, $CanvasLayer/PauseScreen.get_index())
 
+	result_http_request = HTTPRequest.new()
+	add_child(result_http_request)
+	result_box = HBoxContainer.new()
+	result_box.visible = false
+	result_box.anchor_left = 0.09
+	result_box.anchor_top = 0.012
+	result_box.anchor_right = 0.34
+	result_box.anchor_bottom = 0.048
+	result_label = Label.new()
+	result_label.text = "Last game:"
+	result_label.add_theme_font_size_override("font_size", 13)
+	result_box.add_child(result_label)
+	for outcome in [["Won", "win"], ["Lost", "loss"]]:
+		var button = Button.new()
+		button.text = outcome[0]
+		button.pressed.connect(self._on_result_pressed.bind(outcome[1]))
+		result_box.add_child(button)
+	$CanvasLayer.add_child(result_box)
+	$CanvasLayer.move_child(result_box, $CanvasLayer/PauseScreen.get_index())
+
 	formation_label = Label.new()
 	formation_label.anchor_left = 0.04
-	formation_label.anchor_top = 0.056
+	formation_label.anchor_top = 0.05
 	formation_label.anchor_right = 0.968
-	formation_label.anchor_bottom = 0.083
+	formation_label.anchor_bottom = 0.086
 	formation_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	formation_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	formation_label.clip_text = true
-	formation_label.add_theme_font_size_override("font_size", 13)
+	formation_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	formation_label.add_theme_font_size_override("font_size", 12)
+	formation_label.add_theme_constant_override("line_spacing", -2)
 	$CanvasLayer.add_child(formation_label)
 	$CanvasLayer.move_child(formation_label, $CanvasLayer/PauseScreen.get_index())
 
@@ -253,6 +280,15 @@ func _on_misc_server_completed(result, response_code, headers, body):
 # How this draft reached the app, recorded with it in the server's draft log
 func draft_source() -> String:
 	return "manual" if manual_mode else "detect"
+
+func _on_result_pressed(outcome: String):
+	if last_draft.is_empty():
+		return
+	var url = "http://127.0.0.1:"+str(GlobalVars.misc_port)+"/draft_result?result="+outcome+"&user_picks="+last_draft['user']+"&enemy_picks="+last_draft['enemy']+"&first_pick_team="+last_draft['first'].uri_encode()+"&rule="+last_draft['rule']+"&source="+last_draft['source']
+	if result_http_request.get_http_client_status() != 0:
+		result_http_request.cancel_request()
+	result_http_request.request(url)
+	result_box.visible = false
 
 func request_ban_suggestions():
 	if ban_http_request.get_http_client_status() != 0:
@@ -403,6 +439,12 @@ func show_draft(user_picks: Array, enemy_picks: Array, bans_changed: bool):
 	var last_enemy_pick = str(enemy_picks.back()) if not enemy_picks.is_empty() else ''
 	$CanvasLayer/UserPickData.emit_signal('show_counters', last_enemy_pick)
 	EnemyPickStats.emit_signal('char_picked', last_enemy_pick)
+
+	# A newly completed draft: offer to record how its game went
+	if user_picks.size() >= 5 and enemy_picks.size() >= 5 and (last_draft.get('user') != user_team or last_draft.get('enemy') != enemy_team):
+		last_draft = {'user': user_team, 'enemy': enemy_team, 'first': "My Team" if is_user_first_pick else "Enemy Team", 'rule': rule, 'source': draft_source()}
+		result_label.text = "Last game:"
+		result_box.visible = true
 
 	# Request recommendations
 	if can_ask_rec and (rec_forced or user_picks != old_user_team or enemy_picks != old_enemy_team):
