@@ -97,10 +97,27 @@ def parse_team(team_info):
     return [hero_code(h['hero_code']) for h in sorted(heroes, key=lambda h: h['pick_order'])]
 
 
-def parse_team_details(team_info):
-    """Per hero, in pick order: where it stood (1 front .. 4 back, 0 banned), its gear sets and artifact."""
+def parse_energy(battle):
+    """Each hero's Combat Readiness when the battle starts (100 = moves first, 0 = banned), per team.
+
+    This is the only trace of speed in the records: the fastest hero starts at 100 and the others
+    in proportion to their speed. Team '1' is the player the battle list belongs to.
+    """
+    energy = {'1': {}, '2': {}}
+    try:
+        for entry in parse_fragment(battle['energyGauge'], 'energy_gauge'):
+            energy[str(entry['team'])][hero_code(entry['hero_code'])] = entry['energy']
+    except (KeyError, TypeError, ValueError):
+        pass
+    return energy['1'], energy['2']
+
+
+def parse_team_details(team_info, energy):
+    """Per hero, in pick order: where it stood (1 front .. 4 back, 0 banned), its gear sets,
+    artifact and starting Combat Readiness."""
     heroes = parse_fragment(team_info, 'my_team')
-    return [{'position': h.get('position'), 'sets': sorted(h.get('equip') or []), 'artifact': h.get('artifact')}
+    return [{'position': h.get('position'), 'sets': sorted(h.get('equip') or []), 'artifact': h.get('artifact'),
+             'energy': energy.get(hero_code(h['hero_code']))}
             for h in sorted(heroes, key=lambda h: h['pick_order'])]
 
 
@@ -121,6 +138,7 @@ def parse_battle(battle):
     if len(my_team) != 5 or len(enemy_team) != 5 or battle.get('iswin') not in (1, 2):
         return None
 
+    my_energy, enemy_energy = parse_energy(battle)
     my_first = any(h.get('first_pick') == 1 for h in my_deck['hero_list'])
     enemy_first = any(h.get('first_pick') == 1 for h in enemy_deck['hero_list'])
     if my_first == enemy_first:
@@ -147,14 +165,15 @@ def parse_battle(battle):
         'enemy_nick_no': battle.get('matchPlayerNicknameno') or battle.get('enemy_nick_no'),
         'server': battle.get('worldCode'),
         'enemy_server': battle.get('enemy_world_code'),
-        'my_details': parse_team_details(battle['teamBettleInfo']),
-        'enemy_details': parse_team_details(battle['teamBettleInfoenemy']),
+        'my_details': parse_team_details(battle['teamBettleInfo'], my_energy),
+        'enemy_details': parse_team_details(battle['teamBettleInfoenemy'], enemy_energy),
     }
 
 
 def has_details(battle):
-    """Rows cached before positions, gear and turn counts were kept lack them."""
-    return 'my_details' in battle
+    """Rows cached before positions, gear, turn counts and starting Combat Readiness were kept lack them."""
+    details = battle.get('my_details')
+    return bool(details) and 'energy' in details[0]
 
 
 def load_cache(path, today):
